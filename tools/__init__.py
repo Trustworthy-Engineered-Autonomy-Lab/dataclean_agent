@@ -34,7 +34,6 @@ __all__ = [
     "TrainAndDeploy",
     "TrainController",
     "DeployEval",
-
     "WriteLog",
     "SetConstraints",
     "NoteSession"
