@@ -1,0 +1,1126 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DataClean Agent · 数据清洗实验台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<!-- Marked.js for Markdown Rendering -->
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+:root{
+  --radius:10px; --radius-sm:7px;
+  --mono:'IBM Plex Mono',ui-monospace,monospace;
+  --sans:'Inter',system-ui,sans-serif;
+  --display:'Space Grotesk',var(--sans);
+  /* dark (default) */
+  --bg:#0b0f14; --panel:#121922; --panel-2:#182230; --raised:#1e2a3a;
+  --border:#28333f; --border-soft:#1d2632;
+  --text:#e8eef5; --text-dim:#9aa8b8; --text-faint:#62718a;
+  --accent:#e8a33d; --accent-ink:#1a1206; --accent-dim:#3a2c14;
+  --teal:#4fb8ae; --teal-dim:#16302e;
+  --violet:#9b8cff; --violet-dim:#272347;
+  --blue:#5b9bef; --blue-dim:#16263d;
+  --red:#ef6a6d; --red-dim:#3a2224; --green:#5ec98a; --green-dim:#16331f;
+  --shadow:0 8px 30px rgba(0,0,0,.35);
+}
+html[data-theme="light"]{
+  --bg:#eef2f7; --panel:#ffffff; --panel-2:#f5f8fb; --raised:#e9eef4;
+  --border:#d7e0ea; --border-soft:#e4ebf2;
+  --text:#1b2530; --text-dim:#5c6c7e; --text-faint:#91a0b2;
+  --accent:#c9821a; --accent-ink:#fff; --accent-dim:#f6e8d2;
+  --teal:#1f9b90; --teal-dim:#d7efec;
+  --violet:#6a55e0; --violet-dim:#e7e2fb;
+  --blue:#2f7fe0; --blue-dim:#dcebfb;
+  --red:#d8454a; --red-dim:#fbe1e2; --green:#1f9e5e; --green-dim:#dcefe3;
+  --shadow:0 8px 26px rgba(40,60,90,.12);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 var(--sans);
+  display:flex;flex-direction:column;overflow:hidden;-webkit-font-smoothing:antialiased}
+::selection{background:var(--accent-dim);color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+button{font-family:inherit}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:8px;border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:var(--text-faint);background-clip:content-box}
+
+/* ---------- topbar ---------- */
+.topbar{display:flex;align-items:center;gap:14px;padding:10px 18px;background:var(--panel);
+  border-bottom:1px solid var(--border);flex:0 0 auto;z-index:5}
+.brand{display:flex;align-items:center;gap:10px}
+.brand-mark{width:30px;height:30px;border-radius:8px;
+  background:linear-gradient(135deg,var(--accent),#c47f1f);display:flex;align-items:center;
+  justify-content:center;font:700 14px var(--display);color:#1a1206;flex:0 0 auto;box-shadow:var(--shadow)}
+.brand h1{font:600 15px/1 var(--display);letter-spacing:.01em;margin:0}
+.brand span{font:400 11px var(--mono);color:var(--text-faint)}
+.topbar .spacer{margin-left:auto;display:flex;align-items:center;gap:8px}
+.icon-btn{background:var(--panel-2);border:1px solid var(--border);color:var(--text-dim);
+  width:34px;height:34px;border-radius:8px;cursor:pointer;font-size:15px;line-height:1;
+  display:flex;align-items:center;justify-content:center;transition:.12s}
+.icon-btn:hover{background:var(--raised);color:var(--text);border-color:var(--text-faint)}
+.status-pill{display:flex;align-items:center;gap:7px;padding:6px 12px;border-radius:99px;
+  background:var(--panel-2);border:1px solid var(--border);font:500 12px var(--sans);color:var(--text-dim)}
+.status-dot{width:7px;height:7px;border-radius:50%;background:var(--text-faint);flex:0 0 auto;transition:.2s}
+.status-pill.on .status-dot{background:var(--green);box-shadow:0 0 0 3px var(--green-dim)}
+.status-pill.on{color:var(--green)}
+.menu-btn{display:none}
+
+/* ---------- layout ---------- */
+.layout{flex:1 1 auto;display:flex;min-height:0}
+.sidebar{width:308px;flex:0 0 308px;background:var(--panel);border-right:1px solid var(--border);
+  overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:12px}
+main{flex:1 1 auto;display:flex;flex-direction:column;min-width:0;min-height:0}
+.inspector{width:360px;flex:0 0 360px;background:var(--panel);border-left:1px solid var(--border);
+  display:flex;flex-direction:column;min-height:0;transition:margin-right .2s ease}
+.layout.inspector-hidden .inspector{margin-right:-361px}
+@media(max-width:1180px){.inspector{position:fixed;top:53px;right:0;bottom:0;z-index:18;
+  box-shadow:var(--shadow)}.layout.inspector-hidden .inspector{margin-right:0;transform:translateX(100%);transition:transform .2s ease}}
+
+/* ---------- panel ---------- */
+.panel{background:var(--panel-2);border:1px solid var(--border-soft);border-radius:var(--radius);overflow:hidden}
+.panel>summary{list-style:none;cursor:pointer;padding:11px 13px;display:flex;align-items:center;gap:8px;
+  font:600 11.5px var(--display);letter-spacing:.04em;text-transform:uppercase;color:var(--text-dim);user-select:none}
+.panel>summary::-webkit-details-marker{display:none}
+.panel>summary::before{content:'';width:0;height:0;border-left:5px solid var(--text-faint);
+  border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform .15s ease;flex:0 0 auto}
+.panel[open]>summary::before{transform:rotate(90deg)}
+.panel>summary .count{margin-left:auto;font:400 11px var(--mono);color:var(--text-faint)}
+.panel-body{padding:4px 13px 13px}
+label{display:block;font:500 11px var(--sans);color:var(--text-faint);margin:9px 0 4px;letter-spacing:.02em}
+label:first-child{margin-top:2px}
+label.chk{display:flex;align-items:center;gap:7px;font:500 12px var(--sans);color:var(--text-dim);margin:10px 0 2px;cursor:pointer}
+label.chk input{width:auto;margin:0;flex:0 0 auto}
+input,textarea,select{width:100%;padding:9px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);
+  background:var(--panel);color:var(--text);font:13px var(--mono);transition:border-color .12s}
+input:focus,textarea:focus,select:focus{border-color:var(--accent);outline:none}
+input::placeholder,textarea::placeholder{color:var(--text-faint);font-family:var(--sans)}
+.btn{cursor:pointer;background:var(--raised);border:1px solid var(--border);color:var(--text);
+  border-radius:var(--radius-sm);padding:9px 12px;font:500 13px var(--sans);width:100%;margin-top:8px;transition:.12s}
+.btn:hover{background:var(--panel);border-color:var(--text-faint)}
+.btn:disabled{opacity:.5;cursor:wait}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+.btn.primary:hover{filter:brightness(1.06)}
+.btn.ghost{background:transparent;width:auto;padding:7px 12px;margin-top:0;color:var(--text-dim);border-color:var(--border)}
+.btn.ghost:hover{background:var(--raised);color:var(--text)}
+.btn.danger{background:var(--red);border-color:var(--red);color:#fff;font-weight:600}
+.hint{font:400 11.5px var(--sans);color:var(--text-faint);margin-top:7px;line-height:1.5}
+.hint.err{color:var(--red)} .hint.ok{color:var(--green)}
+
+/* ---------- tasks panel ---------- */
+.task-list{display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
+.task-card{text-align:left;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:10px 11px;cursor:pointer;transition:.12s;position:relative}
+.task-card:hover{border-color:var(--text-faint);background:var(--raised)}
+.task-card.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+.task-card-top{display:flex;align-items:center;gap:7px;margin-bottom:6px}
+.task-name{font:600 13px var(--sans);color:var(--text);word-break:break-all}
+.task-desc{font:400 11.5px var(--sans);color:var(--text-faint);margin-top:2px;line-height:1.4;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.task-metrics{display:flex;gap:10px;margin-top:8px;font:400 11px var(--mono);color:var(--text-dim)}
+.task-metrics span b{color:var(--text);font-weight:600}
+.active-dot{margin-left:auto;width:8px;height:8px;border-radius:50%;background:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-dim);flex:0 0 auto}
+.chip{font:600 10px var(--display);letter-spacing:.03em;padding:2px 8px;border-radius:99px;white-space:nowrap}
+.chip-main{background:var(--raised);color:var(--text-dim)}
+.chip-threshold_ablation{background:var(--accent-dim);color:var(--accent)}
+.chip-detector_ablation{background:var(--teal-dim);color:var(--teal)}
+.chip-agent_vs_baseline{background:var(--violet-dim);color:var(--violet)}
+.chip-custom{background:var(--blue-dim);color:var(--blue)}
+.chip-unknown{background:var(--raised);color:var(--text-faint)}
+.task-del-btn{background:transparent;border:none;color:var(--text-faint);font-size:13px;line-height:1;padding:2px 5px;margin-left:auto;cursor:pointer;border-radius:4px;opacity:.5;transition:all .15s ease}
+.task-del-btn:hover{color:var(--danger, #ff4d4f);background:rgba(255,77,79,0.12);opacity:1}
+
+/* ---------- taskbar ---------- */
+.taskbar{flex:0 0 auto;display:flex;align-items:center;gap:14px;padding:11px 22px;
+  background:var(--panel);border-bottom:1px solid var(--border)}
+.taskbar-info{display:flex;align-items:center;gap:9px;min-width:0}
+.tb-name{font:600 14px var(--display);color:var(--text)}
+.tb-desc{font:400 12px var(--sans);color:var(--text-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px}
+.taskbar-metrics{display:flex;gap:8px;margin-left:6px;flex-wrap:wrap}
+.metric{display:flex;flex-direction:column;align-items:center;background:var(--panel-2);
+  border:1px solid var(--border-soft);border-radius:var(--radius-sm);padding:4px 11px;min-width:62px}
+.metric b{font:600 14px var(--display);color:var(--text);line-height:1.1}
+.metric span{font:400 10px var(--sans);color:var(--text-faint);letter-spacing:.03em}
+
+/* ---------- ledger / conversation ---------- */
+.ledger{flex:1 1 auto;overflow-y:auto;padding:22px 26px 8px;position:relative}
+.empty-note{font:400 12px var(--sans);color:var(--text-faint);padding:14px;background:var(--panel-2);
+  border:1px dashed var(--border);border-radius:var(--radius-sm);text-align:center;margin-bottom:12px}
+.entry{display:flex;gap:12px;margin-bottom:18px;animation:rise .18s ease both}
+@keyframes rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.entry .idx{flex:0 0 28px;text-align:right;font:12px var(--mono);color:var(--text-faint);padding-top:8px}
+.entry .rail{flex:0 0 2px;background:var(--border-soft);border-radius:2px;position:relative}
+.entry .rail::before{content:'';position:absolute;top:6px;left:-3px;width:8px;height:8px;border-radius:50%;background:var(--text-faint)}
+.entry.user .rail::before{background:var(--text-dim)}
+.entry.assistant .rail::before{background:var(--violet)}
+.entry.tool_card .rail::before{background:var(--accent)}
+.entry.error .rail::before{background:var(--red)}
+
+.entry .body{flex:1 1 auto;min-width:0}
+.entry .meta{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.badge{font:600 10px var(--display);letter-spacing:.06em;text-transform:uppercase;padding:2px 7px;border-radius:4px}
+.entry.user .badge{background:var(--raised);color:var(--text-dim)}
+.entry.assistant .badge{background:var(--violet-dim);color:var(--violet)}
+.entry.tool_card .badge{background:var(--accent-dim);color:var(--accent)}
+.entry.error .badge{background:var(--red-dim);color:var(--red)}
+
+.entry .content{background:var(--panel-2);border:1px solid var(--border-soft);border-radius:10px;padding:12px 15px;
+  color:var(--text);font:14px/1.65 var(--sans);word-break:break-word}
+.entry.assistant .content{background:transparent;border:none;padding:0;font-size:14.5px}
+
+/* Modern Collapsible Tool Accordion */
+.tool-accordion{background:var(--panel-2);border:1px solid var(--border);border-radius:9px;overflow:hidden;margin:6px 0}
+.tool-accordion summary{list-style:none;cursor:pointer;padding:8px 12px;display:flex;align-items:center;gap:9px;
+  font:500 12.5px var(--mono);color:var(--text-dim);user-select:none;background:var(--panel)}
+.tool-accordion summary::-webkit-details-marker{display:none}
+.tool-accordion summary .tool-spin{width:12px;height:12px;border:2px solid var(--accent);border-top-color:transparent;
+  border-radius:50%;animation:spin .8s linear infinite;flex:0 0 auto}
+@keyframes spin{to{transform:rotate(360deg)}}
+.tool-accordion summary .tool-icon{font-size:13px;flex:0 0 auto}
+.tool-accordion summary .tool-title{flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tool-accordion summary .tool-timer{font:11px var(--mono);color:var(--text-faint);margin-left:auto}
+.tool-accordion summary .tool-status-ok{color:var(--green);font-weight:600}
+.tool-accordion-body{padding:10px 12px;border-top:1px solid var(--border-soft);background:var(--bg);font:12px/1.55 var(--mono)}
+.tool-sub-title{font:600 10.5px var(--display);color:var(--text-faint);text-transform:uppercase;margin:6px 0 3px}
+.tool-json-block{background:var(--panel-2);border:1px solid var(--border-soft);border-radius:6px;padding:8px 10px;
+  color:var(--text-dim);overflow-x:auto;max-height:220px;white-space:pre-wrap;word-break:break-word}
+.tool-progress-box{background:var(--panel);border:1px solid var(--border-soft);border-radius:6px;padding:8px 10px;
+  color:var(--text-dim);max-height:160px;overflow-y:auto;white-space:pre-wrap;margin-top:4px}
+.tool-progress-box .log-line{font-size:11.5px;color:var(--text-faint)}
+
+/* Markdown formatting inside assistant content */
+.entry .content h1,.entry .content h2,.entry .content h3{font-family:var(--display);color:var(--text);margin:12px 0 6px}
+.entry .content p{margin:0 0 10px}
+.entry .content p:last-child{margin-bottom:0}
+.entry .content code{background:var(--panel-2);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font:12px var(--mono);color:var(--accent)}
+.entry .content pre{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px;margin:10px 0;overflow-x:auto;position:relative}
+.entry .content pre code{background:transparent;border:none;padding:0;color:var(--text-dim);font-size:12.5px}
+.entry .content ul,.entry .content ol{margin:6px 0 10px;padding-left:22px}
+.entry .content li{margin:3px 0}
+.entry .content blockquote{border-left:3px solid var(--accent);margin:8px 0;padding:4px 12px;color:var(--text-dim);background:var(--panel-2);border-radius:0 6px 6px 0}
+
+/* Collapsible Thinking Box */
+.think-box{margin:8px 0;border:1px solid var(--border);border-radius:8px;background:var(--panel-2);font-size:12.5px;color:var(--text-dim);overflow:hidden}
+.think-summary{cursor:pointer;padding:6px 12px;font-weight:500;user-select:none;color:var(--violet);background:var(--panel);border-bottom:1px solid transparent}
+.think-box[open] .think-summary{border-bottom-color:var(--border)}
+.think-body{padding:10px 14px;white-space:pre-wrap;font-family:var(--mono);font-size:12px;color:var(--text-dim);background:var(--panel-2)}
+
+/* ---------- composer ---------- */
+.composer{flex:0 0 auto;border-top:1px solid var(--border);background:var(--panel);padding:12px 22px 14px}
+.composer-row{display:flex;gap:10px;align-items:flex-end}
+.composer textarea{flex:1 1 auto;min-height:46px;max-height:170px;resize:vertical;font:13.5px var(--sans);padding:11px 13px;line-height:1.5}
+.composer-btns{display:flex;flex-direction:column;gap:8px;flex:0 0 auto}
+.composer-btns .btn{width:88px;margin-top:0;padding:11px 0}
+.composer-foot{display:flex;align-items:center;justify-space-between;margin-top:8px}
+.kbd-hint{font:11px var(--mono);color:var(--text-faint)}
+.usage{font:11px var(--mono);color:var(--text-faint)}
+.usage b{color:var(--text-dim)}
+
+/* ---------- inspector ---------- */
+.inspector-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;
+  border-bottom:1px solid var(--border);font:600 12px var(--display);letter-spacing:.04em;text-transform:uppercase;color:var(--text-dim)}
+.inspector-body{flex:1 1 auto;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:16px}
+.ins-name{font:600 15px var(--display);color:var(--text);word-break:break-all;display:flex;align-items:center;gap:8px}
+.ins-desc{font:400 12.5px var(--sans);color:var(--text-faint);margin-top:5px;line-height:1.5}
+.sec-title{font:600 11px var(--display);letter-spacing:.05em;text-transform:uppercase;color:var(--text-faint);margin-bottom:9px}
+.state-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.scard{background:var(--panel-2);border:1px solid var(--border-soft);border-radius:var(--radius-sm);padding:9px 11px}
+.scard b{display:block;font:600 17px var(--display);color:var(--text);line-height:1.1}
+.scard span{font:400 10.5px var(--sans);color:var(--text-faint);letter-spacing:.02em}
+.kv{display:flex;flex-direction:column;gap:7px}
+.kv-row{display:flex;gap:10px;font:12.5px var(--sans)}
+.kv-row .k{flex:0 0 96px;color:var(--text-faint)}
+.kv-row .v{color:var(--text);word-break:break-word;flex:1 1 auto}
+.log-view{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius-sm);padding:11px;
+  font:11.5px/1.6 var(--mono);white-space:pre-wrap;word-break:break-word;color:var(--text-dim);max-height:340px;overflow:auto}
+.art-list{display:flex;flex-direction:column;gap:6px}
+.art-row{display:flex;align-items:center;gap:8px;background:var(--panel-2);border:1px solid var(--border-soft);
+  border-radius:var(--radius-sm);padding:7px 10px;cursor:pointer;transition:.12s}
+.art-row:hover{border-color:var(--text-faint);background:var(--raised)}
+.art-name{font:12px var(--mono);color:var(--text);flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.art-size{font:11px var(--mono);color:var(--text-faint)}
+.eval-panel{background:var(--panel-2);border:1px solid var(--border-soft);border-radius:8px;padding:10px;margin-top:8px}
+
+/* ---------- modal ---------- */
+.modal-mask{position:fixed;inset:0;background:rgba(5,8,12,.55);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px}
+html[data-theme="light"] .modal-mask{background:rgba(20,30,45,.35)}
+.modal-mask[hidden]{display:none}
+.modal{width:min(560px,100%);max-height:90vh;overflow-y:auto;background:var(--panel);border:1px solid var(--border);
+  border-radius:14px;box-shadow:var(--shadow)}
+.modal-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border)}
+.modal-head h3{margin:0;font:600 16px var(--display)}
+.modal-body{padding:16px 20px;display:flex;flex-direction:column}
+.modal-foot{display:flex;justify-content:flex-end;gap:10px;padding:14px 20px;border-top:1px solid var(--border)}
+.modal-foot .btn{width:auto;margin-top:0;padding:9px 18px}
+.art-modal-body{padding:16px 20px}
+.art-img{max-width:100%;height:auto;border-radius:8px;display:block;margin:0 auto;background:#fff}
+
+.eval-json{font:12px/1.5 var(--mono);color:var(--text)}
+.eval-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;margin:8px 0}
+.eval-metric{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:8px;text-align:center}
+.eval-metric b{display:block;font-size:16px;color:var(--accent);font-weight:700}
+.eval-metric span{font-size:10.5px;opacity:.7}
+.eval-tbl{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:6px}
+.eval-tbl td,.eval-tbl th{border:1px solid var(--border);padding:4px 7px;text-align:left}
+.eval-tbl td.k{opacity:.7}
+.eval-sec-title{font-weight:600;margin:10px 0 4px;font-size:11px;letter-spacing:.03em;opacity:.85}
+
+@media(max-width:860px){
+  .layout{flex-direction:column}
+  .sidebar{position:fixed;top:53px;left:0;right:0;bottom:0;z-index:20;transform:translateX(-100%);transition:transform .18s ease}
+  .sidebar.open{transform:none}
+  .menu-btn{display:flex}
+  .ledger{padding:16px} .composer{padding:12px}
+  .taskbar{flex-wrap:wrap;gap:10px} .tb-desc{display:none}
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <button class="icon-btn menu-btn" onclick="toggleSidebar()">☰</button>
+  <div class="brand">
+    <div class="brand-mark">DC</div>
+    <div>
+      <h1>DataClean Agent</h1>
+      <span>v2.0 · Auditable Data Curation</span>
+    </div>
+  </div>
+  <div class="topbar .spacer">
+    <div class="status-pill" id="statusPill"><span class="status-dot"></span><span id="statusTxt">未连接</span></div>
+    <button class="icon-btn" title="切换深浅主题" onclick="toggleTheme()">◑</button>
+    <button class="icon-btn" title="切换右侧检视面板" onclick="toggleInspector()">◧</button>
+  </div>
+</header>
+
+<div class="layout" id="layout">
+  <!-- 左侧边栏 -->
+  <aside class="sidebar" id="sidebar">
+    <details class="panel" open>
+      <summary>工作区</summary>
+      <div class="panel-body">
+        <label for="workspace">工作区绝对路径</label>
+        <input id="workspace" placeholder="/absolute/path" onkeydown="if(event.key==='Enter')openWorkspace()">
+        <button class="btn primary" id="openBtn" onclick="openWorkspace()">打开工作区</button>
+        <div class="hint" id="workspaceStatus">尚未打开工作区</div>
+      </div>
+    </details>
+
+    <details class="panel" open>
+      <summary>数据集资源配置</summary>
+      <div class="panel-body">
+        <label for="dataset">数据集路径（相对 workspace）</label>
+        <input id="dataset" placeholder="dataset">
+        <label for="datasetId">数据集 ID</label>
+        <input id="datasetId" placeholder="default">
+        <button class="btn" onclick="configure()">配置数据集</button>
+        <div class="hint" id="configStatus"></div>
+      </div>
+    </details>
+
+    <details class="panel">
+      <summary>模型设置</summary>
+      <div class="panel-body">
+        <label for="model">主模型名</label>
+        <input id="model" placeholder="例如 gpt-4o / Qwen2.5-72B">
+        <label for="base">Base URL</label>
+        <input id="base" placeholder="https://api.example.com/v1">
+        <label for="key">API Key</label>
+        <input id="key" type="password" placeholder="sk-...">
+        <button class="btn" onclick="saveSettings()">保存模型设置</button>
+        <div class="hint" id="settingsStatus"></div>
+      </div>
+    </details>
+
+    <details class="panel">
+      <summary>VLM 评审器设置</summary>
+      <div class="panel-body">
+        <label for="vlmModel">VLM 模型名</label>
+        <input id="vlmModel" placeholder="例如 Qwen2-VL-7B-Instruct">
+        <label for="vlmBase">VLM Base URL</label>
+        <input id="vlmBase" placeholder="https://api.example.com/v1">
+        <label for="vlmKey">VLM API Key</label>
+        <input id="vlmKey" type="password" placeholder="sk-...">
+        <button class="btn" onclick="saveVlmSettings()">保存 VLM 设置</button>
+        <div class="hint" id="vlmSettingsStatus"></div>
+      </div>
+    </details>
+
+    <details class="panel" open>
+      <summary>任务列表 (<span id="taskCount">0</span>)</summary>
+      <div class="panel-body">
+        <div class="task-list" id="taskList"></div>
+        <button class="btn ghost" onclick="openTaskModal()">+ 新建任务分支</button>
+      </div>
+    </details>
+  </aside>
+
+  <!-- 主对话区域 -->
+  <main>
+    <div class="taskbar">
+      <div class="taskbar-info">
+        <span class="tb-name" id="tbName">未选择分支</span>
+        <span class="tb-desc" id="tbDesc">请在左侧选择或新建任务分支</span>
+      </div>
+      <div class="taskbar-metrics" id="tbMetrics"></div>
+    </div>
+
+    <!-- 对话卡片记录流 -->
+    <div class="ledger" id="log">
+      <div class="empty-note" id="ledgerEmpty">暂无对话，在下方输入框告诉 Agent 你的实验目标。</div>
+    </div>
+
+    <!-- 底部输入框 -->
+    <div class="composer">
+      <div class="composer-row">
+        <textarea id="msg" placeholder="在当前任务分支下给 Agent 发送指令…" onkeydown="onComposerKey(event)"></textarea>
+        <div class="composer-btns">
+          <button class="btn primary" id="sendBtn" onclick="send()">发送</button>
+          <button class="btn danger" id="stopBtn" onclick="stop()" hidden>停止</button>
+        </div>
+      </div>
+      <div class="composer-foot">
+        <span class="kbd-hint">Enter 发送 · Shift+Enter 换行</span>
+        <span class="usage" id="usage"></span>
+      </div>
+    </div>
+  </main>
+
+  <!-- 右侧实验检视 Inspector -->
+  <aside class="inspector">
+    <div class="inspector-head">
+      <span>实验检视 Inspector</span>
+      <span id="insTaskId" style="font-family:var(--mono);color:var(--text-faint)">无</span>
+    </div>
+    <div class="inspector-body" id="inspectorBody">
+      <div class="empty-note">加载检视数据中…</div>
+    </div>
+  </aside>
+</div>
+
+<!-- 新建任务 Modal -->
+<div class="modal-mask" id="taskModal" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h3>创建新实验任务</h3>
+      <button class="icon-btn" onclick="closeTaskModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <label for="nf_id">任务 ID（分支名）*</label>
+      <input id="nf_id" placeholder="例如 exp_1">
+      <label for="nf_desc">任务描述 description</label>
+      <textarea id="nf_desc" rows="2" placeholder="简述该分支研究的目标..."></textarea>
+      <label for="nf_hypothesis">实验假设 hypothesis</label>
+      <textarea id="nf_hypothesis" rows="2" placeholder="例如：固定 Otsu 阈值清洗能提升 CTE 指标..."></textarea>
+      <div class="hint err" id="taskModalErr" hidden></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeTaskModal()">取消</button>
+      <button class="btn primary" onclick="submitTask()">创建并激活</button>
+    </div>
+  </div>
+</div>
+
+<!-- Artifact 查看 Modal -->
+<div class="modal-mask" id="artifactModal" hidden>
+  <div class="modal" style="width:min(720px,100%)">
+    <div class="modal-head">
+      <h3 id="artifactTitle">Artifact 预览</h3>
+      <button class="icon-btn" onclick="closeArtifactModal()">✕</button>
+    </div>
+    <div class="art-modal-body" id="artifactBody"></div>
+  </div>
+</div>
+
+<script>
+let activeTask = (localStorage.getItem('dc_active') || '').trim();
+let tasksData = [], datasetData = {configured:false}, chat = null, sending = false;
+let POL = {};
+let activeToolCard = null, activeToolStartTime = 0, activeToolTimer = null;
+
+function $(id){ return document.getElementById(id); }
+function escapeHtml(s){ return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+async function api(path, opts={}){
+  const r = await fetch('/api/'+path, opts);
+  if(!r.ok){
+    let msg = r.statusText;
+    try{ const d = await r.json(); msg = d.detail || d.message || msg; }catch(e){}
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+function toggleTheme(){
+  const html = document.documentElement;
+  html.setAttribute('data-theme', html.getAttribute('data-theme')==='light'?'dark':'light');
+}
+function toggleInspector(){ document.getElementById('layout').classList.toggle('inspector-hidden'); }
+function toggleSidebar(){ document.getElementById('sidebar').classList.toggle('open'); }
+
+/* ---------- Markdown Safe Renderer ---------- */
+function renderMarkdown(text){
+  if(!text) return '';
+  let thinkBlocks = [];
+  let processed = text.replace(/<think>([\s\S]*?)<\/think>/gi, function(_, code){
+    let idx = thinkBlocks.length;
+    thinkBlocks.push(`<details class="think-box"><summary class="think-summary">思考过程 (Reasoning)</summary><div class="think-body">${escapeHtml(code.trim())}</div></details>`);
+    return `___THINK_BLOCK_${idx}___`;
+  });
+  let html = '';
+  if(window.marked && typeof window.marked.parse === 'function'){
+    try { html = window.marked.parse(processed); } catch(e){}
+  }
+  if(!html){
+    html = escapeHtml(processed)
+      .replace(/^### (.*$)/gim, '<h3>$1</h3>')
+      .replace(/^## (.*$)/gim, '<h2>$1</h2>')
+      .replace(/^# (.*$)/gim, '<h1>$1</h1>')
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\n\n/g, '</p><p>')
+      .replace(/\n/g, '<br>');
+    html = '<p>' + html + '</p>';
+  }
+  thinkBlocks.forEach((block, idx)=>{
+    html = html.replace(`___THINK_BLOCK_${idx}___`, block).replace(`<p>___THINK_BLOCK_${idx}___</p>`, block);
+  });
+  return html;
+}
+
+/* ---------- Policies & Settings ---------- */
+async function loadPolicies(){
+  try{
+    POL = await api('policies');
+    applyPoliciesToUI();
+  }catch(e){}
+}
+function applyPoliciesToUI(){
+  const sel = $('nf_type');
+  if(sel && POL.task_types && POL.task_types.length){
+    const cur = sel.value;
+    sel.innerHTML = POL.task_types.map(t=>
+      `<option value="${t}">${escapeHtml(POL.task_type_label?.[t]||t)} (${t})</option>`).join('');
+    if(POL.task_types.includes(cur)) sel.value = cur;
+  }
+}
+
+/* ---------- Workspace & Core Init ---------- */
+async function loadWorkspace(){
+  try{
+    const x = await api('workspace');
+    if(x.current){
+      $('workspace').value = x.current;
+      setStatus(true, x.current);
+      await initAfterWorkspace();
+    } else {
+      activeTask = '';
+      try{ localStorage.removeItem('dc_active'); }catch(e){}
+      setStatus(false);
+      updateTaskbar(null);
+      renderInspector(null, {configured:false});
+    }
+  }catch(e){
+    activeTask = '';
+    try{ localStorage.removeItem('dc_active'); }catch(e){}
+    setStatus(false);
+    updateTaskbar(null);
+    renderInspector(null, {configured:false});
+  }
+}
+
+function setStatus(on, path){
+  const p = $('statusPill');
+  p.className = 'status-pill' + (on?' on':'');
+  $('statusTxt').textContent = on ? '工作区已就绪' : '未连接工作区';
+  $('workspaceStatus').textContent = on ? '已打开：' + path : '尚未打开工作区';
+  if(on) $('workspaceStatus').className = 'hint ok';
+}
+
+async function openWorkspace(){
+  const path = $('workspace').value.trim();
+  if(!path) return;
+  try{
+    const x = await api('workspace', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({path})});
+    setStatus(true, x.current);
+    await initAfterWorkspace();
+  }catch(e){ $('workspaceStatus').className = 'hint err'; $('workspaceStatus').textContent = e.message; }
+}
+
+async function initAfterWorkspace(){
+  try{
+    const s = await api('settings');
+    $('model').value = s.model || ''; $('base').value = s.base_url || ''; $('key').value = s.api_key || '';
+    $('vlmModel').value = s.vlm_model || ''; $('vlmBase').value = s.vlm_base_url || ''; $('vlmKey').value = s.vlm_api_key || '';
+  }catch(e){}
+  await loadPolicies();
+  await loadDataset();
+  await loadTasks();
+  if (tasksData && tasksData.length > 0) {
+    if (!activeTask || !tasksData.some(t => t.task_id === activeTask)) {
+      activeTask = tasksData[0].task_id;
+    }
+  } else {
+    activeTask = '';
+  }
+  if (activeTask) {
+    await selectTask(activeTask, true);
+  } else {
+    updateTaskbar(null);
+    renderInspector(null, datasetData);
+  }
+  try{
+    const cs = await api('chats');
+    chat = cs[0]?.id || (await api('chats', {method:'POST'})).id;
+  }catch(e){}
+}
+
+async function configure(){
+  try{
+    const out = await api('configure', {method:'POST', headers:{'content-type':'application/json'},
+      body:JSON.stringify({dataset_path:$('dataset').value, dataset_id:$('datasetId').value||'default'})});
+    await loadDataset(); await refreshActiveDetail();
+  }catch(e){ $('configStatus').className='hint err'; $('configStatus').textContent=e.message; }
+}
+
+async function loadDataset(){
+  try{ datasetData = await api('dataset'); }
+  catch(e){ datasetData = {configured:false}; }
+  const el = $('configStatus');
+  if(datasetData.configured){
+    const comps = datasetData.source_composition || {};
+    const srcs = Object.keys(comps).length ? Object.entries(comps).map(([k,v])=>`${k}:${v}`).join(' · ') : (datasetData.sources||[]).join(', ');
+    el.className='hint ok';
+    el.innerHTML = `已就绪：<b>${escapeHtml(datasetData.dataset_id||'')}</b> · ${datasetData.raw_samples??'?'} 张` +
+      (srcs?`<br><span style="color:var(--text-faint)">${escapeHtml(srcs)}</span>`:'');
+  } else {
+    el.className='hint'; el.textContent = '未配置数据集。填路径或留空让 agent 扫描候选。';
+  }
+}
+
+/* ---------- Chat Output & Tool Collapsible Accordion ---------- */
+function clearLedger(){
+  if(activeToolTimer){ clearInterval(activeToolTimer); activeToolTimer=null; }
+  activeToolCard = null;
+  const log = $('log');
+  log.innerHTML = '';
+}
+
+function scrollToBottom(){
+  const log = $('log');
+  log.scrollTop = log.scrollHeight;
+}
+
+function logUser(text){
+  const log = $('log');
+  const d = document.createElement('div');
+  d.className = 'entry user';
+  d.innerHTML = `
+    <div class="idx">you</div>
+    <div class="rail"></div>
+    <div class="body">
+      <div class="meta"><span class="badge">USER</span></div>
+      <div class="content">${escapeHtml(text)}</div>
+    </div>
+  `;
+  log.appendChild(d);
+  scrollToBottom();
+}
+
+function logAssistantDelta(text){
+  hideThinking();
+  let el = document.getElementById('currentAssistantBlock');
+  if(!el){
+    const log = $('log');
+    const d = document.createElement('div');
+    d.className = 'entry assistant';
+    d.innerHTML = `
+      <div class="idx">ai</div>
+      <div class="rail"></div>
+      <div class="body">
+        <div class="meta"><span class="badge">AGENT</span></div>
+        <div class="content" id="currentAssistantBlock"></div>
+      </div>
+    `;
+    log.appendChild(d);
+    el = $('currentAssistantBlock');
+    el.dataset.rawText = '';
+  }
+  el.dataset.rawText = (el.dataset.rawText || '') + text;
+  el.innerHTML = renderMarkdown(el.dataset.rawText);
+  scrollToBottom();
+}
+
+function logToolCall(name, args){
+  hideThinking();
+  document.getElementById('currentAssistantBlock')?.removeAttribute('id');
+  
+  const id = 'tool_' + Math.random().toString(36).substring(2, 9);
+  activeToolStartTime = Date.now();
+  
+  const log = $('log');
+  const d = document.createElement('div');
+  d.className = 'entry tool_card';
+  d.id = id;
+  d.dataset.toolName = name;
+  
+  d.innerHTML = `
+    <div class="idx">tool</div>
+    <div class="rail"></div>
+    <div class="body">
+      <details class="tool-accordion" open>
+        <summary id="${id}_summary">
+          <span class="tool-spin"></span>
+          <span class="tool-icon">⚙️</span>
+          <span class="tool-title">正在执行 <b>${escapeHtml(name)}</b></span>
+          <span class="tool-timer" id="${id}_timer">0s</span>
+        </summary>
+        <div class="tool-accordion-body">
+          <div class="tool-sub-title">参数 Arguments</div>
+          <div class="tool-json-block">${escapeHtml(JSON.stringify(args, null, 2))}</div>
+          <div class="tool-sub-title">实时运行日志 Live Log</div>
+          <div class="tool-progress-box" id="${id}_log"><div class="log-line">任务已提交，启动工具执行...</div></div>
+        </div>
+      </details>
+    </div>
+  `;
+  log.appendChild(d);
+  activeToolCard = d;
+  scrollToBottom();
+  
+  activeToolTimer = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - activeToolStartTime) / 1000);
+    const timerEl = $(`${id}_timer`);
+    if(timerEl) timerEl.textContent = `${elapsed}s`;
+  }, 1000);
+}
+
+function logToolProgress(text){
+  if(!activeToolCard) return;
+  const logBox = activeToolCard.querySelector('.tool-progress-box');
+  if(logBox){
+    const line = document.createElement('div');
+    line.className = 'log-line';
+    line.textContent = text;
+    logBox.appendChild(line);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+}
+
+function logToolResult(result){
+  if(activeToolTimer){ clearInterval(activeToolTimer); activeToolTimer = null; }
+  if(!activeToolCard) return;
+  
+  const id = activeToolCard.id;
+  const elapsed = ((Date.now() - activeToolStartTime) / 1000).toFixed(1);
+  const name = activeToolCard.dataset.toolName || 'tool';
+  const summary = $(`${id}_summary`);
+  
+  if(summary){
+    summary.innerHTML = `
+      <span class="tool-icon tool-status-ok">✓</span>
+      <span class="tool-title">已完成 <b>${escapeHtml(name)}</b></span>
+      <span class="tool-timer">用时 ${elapsed}s</span>
+    `;
+  }
+  
+  const body = activeToolCard.querySelector('.tool-accordion-body');
+  if(body){
+    const resTitle = document.createElement('div');
+    resTitle.className = 'tool-sub-title';
+    resTitle.textContent = '工具返回 Result';
+    const resBlock = document.createElement('div');
+    resBlock.className = 'tool-json-block';
+    resBlock.textContent = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+    body.appendChild(resTitle);
+    body.appendChild(resBlock);
+  }
+  
+  const details = activeToolCard.querySelector('.tool-accordion');
+  if(details) details.open = false;
+  
+  activeToolCard = null;
+  scrollToBottom();
+}
+
+function logThinkingChunk(text){
+  let el = document.getElementById('streamingThinkBlock');
+  if(!el){
+    const log = $('log');
+    const wrap = document.createElement('div');
+    wrap.className = 'entry assistant';
+    wrap.innerHTML = `
+      <div class="idx">ai</div>
+      <div class="rail"></div>
+      <div class="body">
+        <details class="think-box" id="streamingThinkBlock">
+          <summary class="think-summary">思考过程 (Reasoning)</summary>
+          <div class="think-body" id="streamingThinkBody"></div>
+        </details>
+      </div>
+    `;
+    log.appendChild(wrap);
+    el = document.getElementById('streamingThinkBlock');
+  }
+  const body = document.getElementById('streamingThinkBody');
+  if(body) body.textContent += text;
+  scrollToBottom();
+}
+function finalizeThinkBlock(){
+  const el = document.getElementById('streamingThinkBlock');
+  if(el) el.removeAttribute('id');
+  const body = document.getElementById('streamingThinkBody');
+  if(body) body.removeAttribute('id');
+}
+function showThinking(){
+  if($('thinkingBlock')) return;
+  const log = $('log');
+  const d = document.createElement('div');
+  d.id = 'thinkingBlock';
+  d.className = 'thinking-box';
+  d.innerHTML = `<span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span> Agent 正在思考...`;
+  log.appendChild(d);
+  scrollToBottom();
+}
+function hideThinking(){
+  const el = $('thinkingBlock');
+  if(el) el.remove();
+}
+
+function renderConversation(messages){
+  clearLedger();
+  if(!messages || !messages.length) return;
+  for(const m of messages){
+    if(m.role === 'user') logUser(m.content || '');
+    else if(m.role === 'assistant'){
+      if(m.tool_calls){
+        for(const tc of m.tool_calls){
+          try{ logToolCall(tc.function?.name, JSON.parse(tc.function?.arguments || '{}')); }
+          catch(e){ logToolCall(tc.function?.name || 'tool', {}); }
+        }
+      }
+      if(m.content){ logAssistantDelta(m.content); document.getElementById('currentAssistantBlock')?.removeAttribute('id'); }
+    }
+    else if(m.role === 'tool') logToolResult(m.content || '');
+  }
+}
+
+async function loadConversation(taskId){
+  try{
+    const d = await api('tasks/'+encodeURIComponent(taskId)+'/messages');
+    renderConversation(d.messages || []);
+  }catch(e){ renderConversation([]); }
+}
+
+/* ---------- Chat Composer & Execution ---------- */
+function onComposerKey(e){
+  if(e.key==='Enter'){
+    if(e.metaKey||e.ctrlKey){ e.preventDefault(); send(); }
+    else if(!e.shiftKey){ e.preventDefault(); send(); }
+  }
+}
+function setSending(on){
+  sending = on;
+  $('sendBtn').disabled = on; $('msg').disabled = on;
+  $('sendBtn').hidden = on; $('stopBtn').hidden = !on;
+  $('usage').textContent = on ? '思考与计算中…' : '';
+  if(on) showThinking(); else hideThinking();
+}
+
+async function send(){
+  const m = $('msg').value.trim();
+  if(!m || sending) return;
+  $('msg').value = ''; logUser(m); setSending(true);
+  try{
+    const r = await fetch('/api/chats/'+(chat||1), {
+      method:'POST', headers:{'content-type':'application/json'},
+      body:JSON.stringify({message:m, task_id:activeTask})
+    });
+    const taskAtSend = activeTask;
+    const rd = r.body.getReader(), dec = new TextDecoder(); let buf = '';
+    for(;;){
+      const z = await rd.read(); if(z.done) break;
+      buf += dec.decode(z.value, {stream:true});
+      const lines = buf.split('\n'); buf = lines.pop();
+      for(const l of lines){
+        if(!l) continue; const e = JSON.parse(l);
+        if(activeTask !== taskAtSend) continue;
+        if(e.type==='thinking') logThinkingChunk(e.text);
+        else if(e.type==='content'){ finalizeThinkBlock(); logAssistantDelta(e.text); }
+        else if(e.type==='tool_call'){ finalizeThinkBlock(); logToolCall(e.name, e.args); }
+        else if(e.type==='tool_progress') logToolProgress(e.text);
+        else if(e.type==='tool_result') logToolResult(e.result);
+        else if(e.type==='done'){
+          if(e.usage) $('usage').innerHTML = `tokens <b>${e.usage.total_tokens}</b> · prompt ${e.usage.prompt_tokens} / comp ${e.usage.completion_tokens}`;
+        }
+      }
+    }
+  }catch(e){ logAssistantDelta('\n[请求错误: ' + e.message + ']'); }
+  finally{ setSending(false); document.getElementById('currentAssistantBlock')?.removeAttribute('id'); await refreshAll(); }
+}
+
+async function stop(){
+  try{ await api('chats/'+(chat||1)+'/stop', {method:'POST'}); }catch(e){}
+}
+
+/* ---------- Open-Loop Evaluate Cards Renderer ---------- */
+async function loadEvalMetricsPanels(){
+  const panels = document.querySelectorAll('.eval-panel[data-metrics]');
+  for(const p of panels){
+    if(p.dataset.loaded) continue;
+    p.dataset.loaded = '1';
+    try{
+      const task = p.dataset.task, name = p.dataset.metrics;
+      const r = await fetch('/api/tasks/'+encodeURIComponent(task)+'/artifact/'+encodeURIComponent(name));
+      const obj = await r.json();
+      p.innerHTML = renderEvalJson(obj);
+    }catch(e){ p.innerHTML = '<div class="hint">开环指标加载失败：'+escapeHtml(e.message)+'</div>'; }
+  }
+}
+function renderEvalJson(o){
+  const card = (v,s)=>`<div class="eval-metric"><b>${v==null?'–':Number(v).toFixed(4)}</b><span>${escapeHtml(s)}</span></div>`;
+  let h = '<div class="eval-json">';
+  h += '<div class="eval-sec-title">开环评估 · '+(escapeHtml(o.target_label||o.target))+' （n='+(o.n_samples==null?'?':o.n_samples)+'）</div>';
+  const m = o.metrics_at_threshold||{};
+  const cm = o.cleaning_metrics||{};
+  h += '<div class="eval-grid">'+card(o.auc,'AUC')+card(m.precision,'Precision')+card(m.recall,'Recall')
+     + card(m.f1,'F1')+card(o.retention_purity,'保留纯净度')
+     + card(cm.normal_retention,'正常保留率')+card(cm.anomaly_leak,'异常泄漏率')
+     + (o.purity_vs_detector_keep!=null?card(o.purity_vs_detector_keep,'VLM纯净度Δ'):'')+'</div>';
+  const cmMat = m.confusion_matrix;
+  if(cmMat){
+    h += '<div class="eval-sec-title">混淆矩阵（full）</div><table class="eval-tbl">'
+      + '<tr><th></th><th>保留</th><th>移除</th></tr>'
+      + '<tr><td class="k">正常</td><td>'+cmMat.normal_kept+'</td><td>'+cmMat.normal_removed+'</td></tr>'
+      + '<tr><td class="k">异常</td><td>'+cmMat.anomaly_kept+'</td><td>'+cmMat.anomaly_removed+'</td></tr>'
+      + '</table>';
+  }
+  h += '</div>';
+  return h;
+}
+
+/* ---------- Tasks & Inspector Rendering ---------- */
+async function loadTasks(){
+  try{ tasksData = await api('tasks'); }catch(e){ tasksData = []; }
+  renderTaskList();
+}
+function renderTaskList(){
+  $('taskCount').textContent = tasksData.length;
+  const list = $('taskList');
+  if(!tasksData.length){ list.innerHTML='<div class="empty-note">暂无实验任务，在输入框中向 Agent 描述目标。</div>'; return; }
+  list.innerHTML = tasksData.map(t=>{
+    const active = t.task_id===activeTask;
+    const descText = (t.description && t.description !== t.task_id) ? t.description : '';
+    return `<div class="task-card ${active?'active':''}" onclick="selectTask('${t.task_id}')">
+      <div class="task-card-top">
+        ${active?'<span class="active-dot"></span>':''}
+        <button class="task-del-btn" title="删除任务分支" onclick="deleteTaskBranch('${escapeHtml(t.task_id)}', event)">✕</button>
+      </div>
+      <div class="task-name">${escapeHtml(t.task_id)}</div>
+      ${descText?`<div class="task-desc">${escapeHtml(descText)}</div>`:''}
+      <div class="task-metrics"><span>轮 <b>${t.round??'–'}</b></span><span>部署 <b>${t.deployments??'–'}</b></span><span>CTE <b>${t.best_cte!=null?Number(t.best_cte).toFixed(3):'–'}</b></span></div>
+    </div>`;
+  }).join('');
+}
+
+async function deleteTaskBranch(id, ev){
+  if(ev) ev.stopPropagation();
+  if(!confirm(`确定要删除任务分支 "${id}" 吗？`)) return;
+  try{
+    await api('tasks/'+encodeURIComponent(id), {method:'DELETE'});
+    if(activeTask===id){
+      activeTask = '';
+      try{ localStorage.removeItem('dc_active'); }catch(e){}
+    }
+    await loadTasks();
+    await refreshAll();
+  }catch(e){ alert('删除失败: '+e.message); }
+}
+
+async function selectTask(id, silent){
+  if(!id){
+    activeTask = '';
+    try{ localStorage.removeItem('dc_active'); }catch(e){}
+  } else {
+    activeTask = id;
+    try{ localStorage.setItem('dc_active', id); }catch(e){}
+  }
+  renderTaskList();
+  if(activeTask){
+    await loadConversation(activeTask);
+    await refreshActiveDetail();
+  } else {
+    updateTaskbar(null);
+    renderInspector(null, datasetData);
+  }
+}
+
+async function refreshActiveDetail(){
+  await loadDataset();
+  let d = null;
+  try{ d = await api('tasks/'+encodeURIComponent(activeTask)); }catch(e){}
+  updateTaskbar(d);
+  renderInspector(d, datasetData);
+  loadEvalMetricsPanels();
+}
+
+function updateTaskbar(d){
+  if (!activeTask) {
+    $('tbName').textContent = '未选择分支';
+    $('tbDesc').textContent = '请在左侧选择或新建任务分支';
+    $('insTaskId').textContent = '无';
+    $('tbMetrics').innerHTML = '';
+    return;
+  }
+  const spec = d?.spec||{}, state = d?.state||{};
+  $('tbName').textContent = activeTask;
+  let desc = (spec.description && spec.description !== activeTask) ? spec.description : '当前激活任务分支';
+  $('tbDesc').textContent = desc;
+  $('insTaskId').textContent = activeTask;
+  
+  const m = [];
+  const card = (b,s)=>`<div class="metric"><b>${b==null?'–':b}</b><span>${s}</span></div>`;
+  m.push(card(state.round,'轮次'));
+  m.push(card(state.deployments,'部署'));
+  m.push(card(state.best_cte!=null?Number(state.best_cte).toFixed(4):null,'最佳CTE'));
+  $('tbMetrics').innerHTML = m.join('');
+}
+
+function renderInspector(d, ds){
+  const body = $('inspectorBody');
+  const spec = d?.spec||{}, state = d?.state||{}, sess = d?.session||{};
+  let html = '';
+  
+  if(ds && ds.configured){
+    const comps = ds.source_composition || {};
+    const srcRows = Object.entries(comps).map(([k,v])=>`<div class="kv-row"><div class="k">${escapeHtml(k)}</div><div class="v">${v} 张</div></div>`).join('');
+    html += '<div><div class="sec-title">物理全量数据集 (Workspace)</div><div class="kv">'+
+      `<div class="kv-row"><div class="k">ID</div><div class="v">${escapeHtml(ds.dataset_id||'')}</div></div>`+
+      `<div class="kv-row"><div class="k">总物理样本</div><div class="v">${ds.raw_samples??'?'} 张</div></div></div>`+
+      (srcRows?`<div class="kv" style="margin-top:6px">${srcRows}</div>`:'')+'</div>';
+  }
+
+  const sub = state.dataset_subset;
+  if(sub && Object.keys(sub).length){
+    let subStr = '';
+    if(sub.max_per_source != null){
+      if(typeof sub.max_per_source === 'object'){
+        subStr += Object.entries(sub.max_per_source).map(([k,v])=>`${k}:上限${v}`).join(' · ');
+      } else {
+        subStr += `每源上限 ${sub.max_per_source} 张`;
+      }
+    }
+    if(sub.include_sources) subStr += (subStr?' | ':'') + `仅含: ${sub.include_sources.join(',')}`;
+    if(sub.exclude_sources) subStr += (subStr?' | ':'') + `排除: ${sub.exclude_sources.join(',')}`;
+    html += '<div><div class="sec-title">当前分支数据约束 (Branch Subset)</div><div class="kv">'+
+      `<div class="kv-row"><div class="k">约束采样</div><div class="v">${escapeHtml(subStr||'未限制')}</div></div>`+
+      '</div></div>';
+  }
+  
+  if(sess.goal || sess.hypothesis || sess.status){
+    html += '<div><div class="sec-title">会话记忆 Session</div><div class="kv">';
+    if(sess.status) html += `<div class="kv-row"><div class="k">状态</div><div class="v">${escapeHtml(sess.status)}</div></div>`;
+    if(sess.goal) html += `<div class="kv-row"><div class="k">目标</div><div class="v">${escapeHtml(sess.goal)}</div></div>`;
+    if(sess.hypothesis) html += `<div class="kv-row"><div class="k">假设</div><div class="v">${escapeHtml(sess.hypothesis)}</div></div>`;
+    html += '</div></div>';
+  }
+  
+  if(state && Object.keys(state).length){
+    html += '<div><div class="sec-title">状态摘要 State</div><div class="state-grid">';
+    html += `<div class="scard"><b>${state.round??0}</b><span>轮次 round</span></div>`;
+    html += `<div class="scard"><b>${state.deployments??0}</b><span>部署 deployments</span></div>`;
+    html += '</div></div>';
+  }
+  
+  if(d?.decision_log){
+    html += '<div><div class="sec-title">决策日志 decision_log.md</div><div class="log-view">'+escapeHtml(d.decision_log)+'</div></div>';
+  }
+  
+  const ev = state.latest_observation && state.latest_observation.evaluate;
+  if(ev){
+    html += '<div><div class="sec-title">开环评估 evaluate（'+(escapeHtml(ev.target_label||ev.target))+'）</div>';
+    html += '<div class="hint">n_samples='+ev.n_samples+' · threshold='+(ev.threshold_label||'–')+'</div>';
+    const mj = ev.artifacts && ev.artifacts.metrics_json;
+    if(mj){
+      html += '<div class="eval-panel" data-task="'+escapeHtml(activeTask)+'" data-metrics="'+escapeHtml(mj)+'"><div class="hint">加载开环指标…</div></div>';
+    }
+    const arts=ev.artifacts||{};
+    const imgs=['score_scatter','roc','score_hist','pr'].filter(k=>arts[k])
+      .map(k=>`<div class="art-row" onclick="openArtifact('${escapeHtml(activeTask)}','${escapeHtml(arts[k])}')"><span class="art-name">${escapeHtml(arts[k])}</span></div>`).join('');
+    if(imgs) html += '<div class="hint" style="margin-top:6px">点击查看图表：</div><div class="art-list" style="margin-top:4px">'+imgs+'</div>';
+    html += '</div>';
+  }
+
+  if(d?.artifacts && d.artifacts.length){
+    html += '<div><div class="sec-title">实验产物 Artifacts ('+d.artifacts.length+')</div><div class="art-list">'+
+      d.artifacts.map(a=>`<div class="art-row" onclick="openArtifact('${escapeHtml(activeTask)}','${escapeHtml(a.name)}')"><span class="art-name">${escapeHtml(a.name)}</span><span class="art-size">${(a.size/1024).toFixed(1)} KB</span></div>`).join('')+
+      '</div></div>';
+  }
+  
+  body.innerHTML = html || '<div class="empty-note">暂无检视数据</div>';
+}
+
+async function openArtifact(taskId, name){
+  $('artifactTitle').textContent = name;
+  const body = $('artifactBody');
+  body.textContent = '加载中…';
+  $('artifactModal').hidden = false;
+  try{
+    const r = await fetch('/api/tasks/'+encodeURIComponent(taskId)+'/artifact/'+encodeURIComponent(name));
+    if(/\.(png|jpe?g|gif|webp)$/i.test(name)){
+      const blob = await r.blob();
+      body.innerHTML = '<img class="art-img" src="'+URL.createObjectURL(blob)+'">';
+      return;
+    }
+    const txt = await r.text();
+    if(/\.json$/i.test(name)){
+      try{
+        const obj = JSON.parse(txt);
+        if(obj && obj.target && (obj.auc !== undefined || obj.metrics_at_threshold)){
+          body.innerHTML = renderEvalJson(obj);
+          return;
+        }
+      }catch(e){}
+    }
+    body.innerHTML = '<pre>'+escapeHtml(txt)+'</pre>';
+  }catch(e){ body.textContent = '读取失败：'+e.message; }
+}
+function closeArtifactModal(){ $('artifactModal').hidden = true; }
+
+async function saveSettings(){
+  try{
+    await api('settings',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({model:$('model').value, base_url:$('base').value, api_key:$('key').value})});
+    $('settingsStatus').className='hint ok'; $('settingsStatus').textContent='已保存';
+  }catch(e){ $('settingsStatus').className='hint err'; $('settingsStatus').textContent=e.message; }
+}
+async function saveVlmSettings(){
+  try{
+    await api('settings',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({vlm_model:$('vlmModel').value, vlm_base_url:$('vlmBase').value, vlm_api_key:$('vlmKey').value})});
+    $('vlmSettingsStatus').className='hint ok'; $('vlmSettingsStatus').textContent='已保存';
+  }catch(e){ $('vlmSettingsStatus').className='hint err'; $('vlmSettingsStatus').textContent=e.message; }
+}
+
+async function refreshAll(){ await loadTasks(); await refreshActiveDetail(); }
+
+function openTaskModal(){ $('taskModal').hidden = false; }
+function closeTaskModal(){ $('taskModal').hidden = true; }
+async function submitTask(){
+  const id = $('nf_id').value.trim();
+  if(!id) return;
+  try{
+    await api('tasks', {method:'POST', headers:{'content-type':'application/json'},
+      body:JSON.stringify({task_id:id, description:$('nf_desc').value, hypothesis:$('nf_hypothesis').value})});
+    closeTaskModal(); await loadTasks(); await selectTask(id);
+  }catch(e){ alert(e.message); }
+}
+
+loadWorkspace();
+</script>
+</body>
+</html>

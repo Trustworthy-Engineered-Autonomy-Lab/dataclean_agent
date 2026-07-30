@@ -1,0 +1,8 @@
+{
+  "model": "./models/Qwen3-VL-8B-Instruct",
+  "base_url": "http://localhost:8000/v1",
+  "api_key": "123",
+  "vlm_model": "./models/Qwen3-VL-8B-Instruct",
+  "vlm_base_url": "http://localhost:8000/v1",
+  "vlm_api_key": "123"
+}
