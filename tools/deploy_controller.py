@@ -1,13 +1,8 @@
 import json
 from .base import Tool
-from .utils import _load, _save, _ensure_constraints
 from pathlib import Path
-import paramiko
 
-HOSTNAME = "teacar2"
-USERNAME = "nvidia"
-PASSWORD = "nvidia"
-CONTROLLER_TARGET_DIR = f"/home/{USERNAME}/iros_ws/controllers/"
+from .teacar import TEACar, CONTROLLER_TARGET_DIR
 
 class DeployController(Tool):
     name = "deploy_controller"
@@ -28,20 +23,13 @@ class DeployController(Tool):
         source_path = (Path(workspace_dir) / controller_path).resolve()
 
         try:
-            with paramiko.SSHClient() as client:
-                client.load_system_host_keys()
-                client.set_missing_host_key_policy(paramiko.RejectPolicy())
-
-                client.connect(
-                    hostname=HOSTNAME,
-                    username=USERNAME,
-                    password=PASSWORD,
-                )
-
+            with TEACar() as client:
+                
                 target_path = Path(CONTROLLER_TARGET_DIR) / source_path.name
 
                 with client.open_sftp() as sftp:
                     sftp.put(str(source_path), str(target_path))
+                    
         except Exception as e:
             return f"Failed to deploy {controller_path}: {e}"
 

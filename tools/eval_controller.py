@@ -1,10 +1,7 @@
 import json
 from .base import Tool
 from pathlib import Path
-from contextlib import chdir
-import paramiko
-
-from .deploy_controller import USERNAME, HOSTNAME, PASSWORD, CONTROLLER_TARGET_DIR
+from .teacar import TEACar
 
 class EvalController(Tool):
     name = "eval_controller"
@@ -32,16 +29,7 @@ class EvalController(Tool):
     def run(self, controller_path: str, n_images: int, workspace_dir=None, **_):
 
         try:
-            with paramiko.SSHClient() as client:
-                client.load_system_host_keys()
-                client.set_missing_host_key_policy(paramiko.RejectPolicy())
-
-                client.connect(
-                    hostname=HOSTNAME,
-                    username=USERNAME,
-                    password=PASSWORD,
-                )
-
+            with TEACar() as client:
                 stdin, stdout, stderr = client.exec_command(
                     "cd ~/iros_ws && "
                     "source ~/iros_ws/devel/setup.bash && "

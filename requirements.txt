@@ -9,4 +9,4 @@ scipy>=1.11
 matplotlib>=3.7
 pillow>=10.0
 # Optional for the neural detector/controller implementations:
-# torch>=2.2
+torch>=2.2
