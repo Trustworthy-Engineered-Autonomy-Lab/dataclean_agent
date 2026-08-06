@@ -13,7 +13,8 @@ from .resolve import Resolve
 from .evaluate import Evaluate
 from .train_and_deploy import TrainAndDeploy
 from .train_controller import TrainController
-from .deploy_eval import DeployEval
+from .deploy_controller import DeployController
+from .eval_controller import EvalController
 
 from .write_log import WriteLog
 from .set_constraints import SetConstraints
@@ -33,7 +34,8 @@ __all__ = [
     "Evaluate",
     "TrainAndDeploy",
     "TrainController",
-    "DeployEval",
+    "DeployController",
+    "EvalController",
     "WriteLog",
     "SetConstraints",
     "NoteSession"
