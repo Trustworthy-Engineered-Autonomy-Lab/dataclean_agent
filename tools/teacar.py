@@ -62,3 +62,7 @@ class TEACar:
 
         return False
 
+    @property
+    def jump(self) -> paramiko.SSHClient:
+        return self._jump_client
+
