@@ -2,7 +2,8 @@ import json
 from .base import Tool
 from pathlib import Path
 from datetime import datetime
-from .teacar import TEACar
+from .teacar import TEACar, IROS_WS_DIR
+from .eval_controller import CTE_PROJECT_DIR
 
 class TransferEvalResults(Tool):
     name = "transfer_eval_results"
@@ -47,9 +48,11 @@ class TransferEvalResults(Tool):
             with teacar as car:
 
                 with car.open_sftp() as sftp:
+                    sftp.chdir(IROS_WS_DIR)
                     sftp.get(str(remote_data_path), str(local_data_path))
 
                 with teacar.jump.open_sftp() as sftp:
+                    sftp.chdir(CTE_PROJECT_DIR)
                     sftp.get(str(remote_cte_path), str(local_cte_path))
 
         except Exception as e:

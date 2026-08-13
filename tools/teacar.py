@@ -6,7 +6,7 @@ KNOWN_HOSTS_PATH = os.path.expanduser("~/.ssh/known_hosts")
 HOSTNAME = "teacar2"
 USERNAME = "nvidia"
 PASSWORD = "nvidia"
-CONTROLLER_TARGET_DIR = f"/home/{USERNAME}/iros_ws/controllers/"
+CONTROLLER_TARGET_DIR = f"/home/{USERNAME}/iros_ws/controllers"
 IROS_WS_DIR = f"/home/{USERNAME}/iros_ws"
 
 JUMP_HOSTNAME = "ece-d4100-w02.ad.ufl.edu"
