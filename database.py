@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import sqlite3
 import threading
@@ -6,6 +8,7 @@ from pathlib import Path
 DB_FILENAME = ".agent.db"
 _workspace: Path | None = None
 _local = threading.local()
+_task_chat_guard = threading.Lock()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -51,14 +54,31 @@ def connection() -> sqlite3.Connection:
     return conns[str(db)]
 
 def get_task_chat(task_id):
+    with _task_chat_guard:
+        con = connection()
+        row = con.execute("SELECT conversation_id FROM task_conversations WHERE task_id=?", (task_id,)).fetchone()
+        if row:
+            return Chat.get(row["conversation_id"])
+        chat = Chat.create(title="task:" + task_id)
+        con.execute("INSERT INTO task_conversations(task_id, conversation_id) VALUES(?,?)", (task_id, chat.id))
+        con.commit()
+        return chat
+
+
+def delete_task_chat(task_id):
     con = connection()
-    row = con.execute("SELECT conversation_id FROM task_conversations WHERE task_id=?", (task_id,)).fetchone()
-    if row:
-        return Chat.get(row["conversation_id"])
-    chat = Chat.create(title="task:" + task_id)
-    con.execute("INSERT INTO task_conversations(task_id, conversation_id) VALUES(?,?)", (task_id, chat.id))
+    row = con.execute(
+        "SELECT conversation_id FROM task_conversations WHERE task_id=?", (task_id,)
+    ).fetchone()
+    if not row:
+        return
+    conversation_id = row["conversation_id"]
+    con.execute("DELETE FROM task_conversations WHERE task_id=?", (task_id,))
+    con.execute("DELETE FROM messages WHERE conversation_id=?", (conversation_id,))
+    con.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
     con.commit()
-    return chat
+    with Chat._guard:
+        Chat._locks.pop(conversation_id, None)
 
 class Chat:
     _locks: dict[int, threading.Lock] = {}

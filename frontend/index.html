@@ -9,6 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <!-- Marked.js for Markdown Rendering -->
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
 <style>
 :root{
   --radius:10px; --radius-sm:7px;
@@ -131,6 +132,8 @@ input::placeholder,textarea::placeholder{color:var(--text-faint);font-family:var
 .chip-agent_vs_baseline{background:var(--violet-dim);color:var(--violet)}
 .chip-custom{background:var(--blue-dim);color:var(--blue)}
 .chip-unknown{background:var(--raised);color:var(--text-faint)}
+.chip-adaptive_agent{background:var(--teal-dim);color:var(--teal)}
+.chip-fixed_baseline{background:var(--violet-dim);color:var(--violet)}
 .task-del-btn{background:transparent;border:none;color:var(--text-faint);font-size:13px;line-height:1;padding:2px 5px;margin-left:auto;cursor:pointer;border-radius:4px;opacity:.5;transition:all .15s ease}
 .task-del-btn:hover{color:var(--danger, #ff4d4f);background:rgba(255,77,79,0.12);opacity:1}
 
@@ -290,7 +293,7 @@ html[data-theme="light"] .modal-mask{background:rgba(20,30,45,.35)}
       <span>v2.0 · Auditable Data Curation</span>
     </div>
   </div>
-  <div class="topbar .spacer">
+  <div class="spacer">
     <div class="status-pill" id="statusPill"><span class="status-dot"></span><span id="statusTxt">未连接</span></div>
     <button class="icon-btn" title="切换深浅主题" onclick="toggleTheme()">◑</button>
     <button class="icon-btn" title="切换右侧检视面板" onclick="toggleInspector()">◧</button>
@@ -307,6 +310,7 @@ html[data-theme="light"] .modal-mask{background:rgba(20,30,45,.35)}
         <input id="workspace" placeholder="/absolute/path" onkeydown="if(event.key==='Enter')openWorkspace()">
         <button class="btn primary" id="openBtn" onclick="openWorkspace()">打开工作区</button>
         <div class="hint" id="workspaceStatus">尚未打开工作区</div>
+        <div class="hint" id="runtimeStatus"></div>
       </div>
     </details>
 
@@ -331,6 +335,10 @@ html[data-theme="light"] .modal-mask{background:rgba(20,30,45,.35)}
         <input id="base" placeholder="https://api.example.com/v1">
         <label for="key">API Key</label>
         <input id="key" type="password" placeholder="sk-...">
+        <label for="temperature">Temperature（建议 0）</label>
+        <input id="temperature" type="number" min="0" max="2" step="0.1" value="0">
+        <label for="seed">Seed（后端支持时使用）</label>
+        <input id="seed" type="number" step="1" placeholder="可选">
         <button class="btn" onclick="saveSettings()">保存模型设置</button>
         <div class="hint" id="settingsStatus"></div>
       </div>
@@ -390,10 +398,10 @@ html[data-theme="light"] .modal-mask{background:rgba(20,30,45,.35)}
     </div>
   </main>
 
-  <!-- 右侧实验检视 Inspector -->
+  <!-- 右侧任务概览 -->
   <aside class="inspector">
     <div class="inspector-head">
-      <span>实验检视 Inspector</span>
+      <span>任务概览</span>
       <span id="insTaskId" style="font-family:var(--mono);color:var(--text-faint)">无</span>
     </div>
     <div class="inspector-body" id="inspectorBody">
@@ -406,16 +414,15 @@ html[data-theme="light"] .modal-mask{background:rgba(20,30,45,.35)}
 <div class="modal-mask" id="taskModal" hidden>
   <div class="modal">
     <div class="modal-head">
-      <h3>创建新实验任务</h3>
+      <h3>创建新任务</h3>
       <button class="icon-btn" onclick="closeTaskModal()">✕</button>
     </div>
     <div class="modal-body">
       <label for="nf_id">任务 ID（分支名）*</label>
       <input id="nf_id" placeholder="例如 exp_1">
-      <label for="nf_desc">任务描述 description</label>
-      <textarea id="nf_desc" rows="2" placeholder="简述该分支研究的目标..."></textarea>
-      <label for="nf_hypothesis">实验假设 hypothesis</label>
-      <textarea id="nf_hypothesis" rows="2" placeholder="例如：固定 Otsu 阈值清洗能提升 CTE 指标..."></textarea>
+      <label for="nf_desc">任务描述*</label>
+      <textarea id="nf_desc" rows="4" placeholder="用自然语言说明你希望 Agent 完成什么；创建后可继续在对话中补充或调整。"></textarea>
+      <div class="hint">其余实验策略由你和 Agent 在后续对话中共同确定。</div>
       <div class="hint err" id="taskModalErr" hidden></div>
     </div>
     <div class="modal-foot">
@@ -441,6 +448,7 @@ let activeTask = (localStorage.getItem('dc_active') || '').trim();
 let tasksData = [], datasetData = {configured:false}, chat = null, sending = false;
 let POL = {};
 let activeToolCard = null, activeToolStartTime = 0, activeToolTimer = null;
+const toolCardsByCallId = new Map();
 
 function $(id){ return document.getElementById(id); }
 function escapeHtml(s){ return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -465,15 +473,12 @@ function toggleSidebar(){ document.getElementById('sidebar').classList.toggle('o
 /* ---------- Markdown Safe Renderer ---------- */
 function renderMarkdown(text){
   if(!text) return '';
-  let thinkBlocks = [];
-  let processed = text.replace(/<think>([\s\S]*?)<\/think>/gi, function(_, code){
-    let idx = thinkBlocks.length;
-    thinkBlocks.push(`<details class="think-box"><summary class="think-summary">思考过程 (Reasoning)</summary><div class="think-body">${escapeHtml(code.trim())}</div></details>`);
-    return `___THINK_BLOCK_${idx}___`;
-  });
+  // Private chain-of-thought is not a user artifact. Local backends that emit
+  // <think> blocks are redacted; auditable evidence lives in tool rationales.
+  let processed = text.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<think>[\s\S]*$/gi, '');
   let html = '';
-  if(window.marked && typeof window.marked.parse === 'function'){
-    try { html = window.marked.parse(processed); } catch(e){}
+  if(window.marked && window.DOMPurify && typeof window.marked.parse === 'function'){
+    try { html = window.DOMPurify.sanitize(window.marked.parse(processed)); } catch(e){}
   }
   if(!html){
     html = escapeHtml(processed)
@@ -486,9 +491,6 @@ function renderMarkdown(text){
       .replace(/\n/g, '<br>');
     html = '<p>' + html + '</p>';
   }
-  thinkBlocks.forEach((block, idx)=>{
-    html = html.replace(`___THINK_BLOCK_${idx}___`, block).replace(`<p>___THINK_BLOCK_${idx}___</p>`, block);
-  });
   return html;
 }
 
@@ -552,10 +554,15 @@ async function openWorkspace(){
 }
 
 async function initAfterWorkspace(){
+  await loadHealth();
   try{
     const s = await api('settings');
-    $('model').value = s.model || ''; $('base').value = s.base_url || ''; $('key').value = s.api_key || '';
-    $('vlmModel').value = s.vlm_model || ''; $('vlmBase').value = s.vlm_base_url || ''; $('vlmKey').value = s.vlm_api_key || '';
+    $('model').value = s.model || ''; $('base').value = s.base_url || ''; $('key').value = '';
+    $('key').placeholder = s.api_key_set ? '已配置；留空保持不变' : 'API key';
+    $('vlmModel').value = s.vlm_model || ''; $('vlmBase').value = s.vlm_base_url || ''; $('vlmKey').value = '';
+    $('vlmKey').placeholder = s.vlm_api_key_set ? '已配置；留空保持不变' : 'VLM API key';
+    $('temperature').value = s.temperature == null ? '' : s.temperature;
+    $('seed').value = s.seed == null ? '' : s.seed;
   }catch(e){}
   await loadPolicies();
   await loadDataset();
@@ -579,6 +586,23 @@ async function initAfterWorkspace(){
   }catch(e){}
 }
 
+async function loadHealth(){
+  const el = $('runtimeStatus');
+  try{
+    const h = await api('health');
+    if(h.ok){
+      el.className='hint ok';
+      el.textContent=`运行时就绪 · Python ${h.python}` + (h.agent_model_configured?'':' · 尚未配置主模型');
+    }else{
+      el.className='hint err';
+      const missing=(h.missing_required_tools||[]).join(', ');
+      const modules=(h.missing_required_modules||[]).join(', ');
+      el.textContent=`运行时不完整 · Python ${h.python}` +
+        (missing?` · 缺少工具: ${missing}`:'') + (modules?` · 缺少依赖: ${modules}`:'');
+    }
+  }catch(e){ el.className='hint err'; el.textContent='无法读取运行时健康状态：'+e.message; }
+}
+
 async function configure(){
   try{
     const out = await api('configure', {method:'POST', headers:{'content-type':'application/json'},
@@ -598,7 +622,8 @@ async function loadDataset(){
     el.innerHTML = `已就绪：<b>${escapeHtml(datasetData.dataset_id||'')}</b> · ${datasetData.raw_samples??'?'} 张` +
       (srcs?`<br><span style="color:var(--text-faint)">${escapeHtml(srcs)}</span>`:'');
   } else {
-    el.className='hint'; el.textContent = '未配置数据集。填路径或留空让 agent 扫描候选。';
+    el.className=datasetData.error?'hint err':'hint';
+    el.textContent = datasetData.error || '未配置数据集。填写路径后注册基础数据。';
   }
 }
 
@@ -606,6 +631,7 @@ async function loadDataset(){
 function clearLedger(){
   if(activeToolTimer){ clearInterval(activeToolTimer); activeToolTimer=null; }
   activeToolCard = null;
+  toolCardsByCallId.clear();
   const log = $('log');
   log.innerHTML = '';
 }
@@ -655,7 +681,7 @@ function logAssistantDelta(text){
   scrollToBottom();
 }
 
-function logToolCall(name, args){
+function logToolCall(name, args, callId=null, historical=false){
   hideThinking();
   document.getElementById('currentAssistantBlock')?.removeAttribute('id');
   
@@ -667,6 +693,10 @@ function logToolCall(name, args){
   d.className = 'entry tool_card';
   d.id = id;
   d.dataset.toolName = name;
+  if(callId){
+    d.dataset.toolCallId = callId;
+    toolCardsByCallId.set(callId, d);
+  }
   
   d.innerHTML = `
     <div class="idx">tool</div>
@@ -692,11 +722,13 @@ function logToolCall(name, args){
   activeToolCard = d;
   scrollToBottom();
   
-  activeToolTimer = setInterval(() => {
-    const elapsed = Math.floor((Date.now() - activeToolStartTime) / 1000);
-    const timerEl = $(`${id}_timer`);
-    if(timerEl) timerEl.textContent = `${elapsed}s`;
-  }, 1000);
+  if(!historical){
+    activeToolTimer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - activeToolStartTime) / 1000);
+      const timerEl = $(`${id}_timer`);
+      if(timerEl) timerEl.textContent = `${elapsed}s`;
+    }, 1000);
+  }
 }
 
 function logToolProgress(text){
@@ -711,24 +743,26 @@ function logToolProgress(text){
   }
 }
 
-function logToolResult(result){
+function logToolResult(result, ok=true, status='succeeded', callId=null){
   if(activeToolTimer){ clearInterval(activeToolTimer); activeToolTimer = null; }
-  if(!activeToolCard) return;
+  const targetCard = (callId && toolCardsByCallId.get(callId)) || activeToolCard;
+  if(!targetCard) return;
   
-  const id = activeToolCard.id;
+  const id = targetCard.id;
   const elapsed = ((Date.now() - activeToolStartTime) / 1000).toFixed(1);
-  const name = activeToolCard.dataset.toolName || 'tool';
+  const name = targetCard.dataset.toolName || 'tool';
   const summary = $(`${id}_summary`);
   
   if(summary){
+    const succeeded = ok !== false;
     summary.innerHTML = `
-      <span class="tool-icon tool-status-ok">✓</span>
-      <span class="tool-title">已完成 <b>${escapeHtml(name)}</b></span>
+      <span class="tool-icon ${succeeded?'tool-status-ok':'err'}">${succeeded?'✓':'✕'}</span>
+      <span class="tool-title">${succeeded?'已完成':'执行失败'} <b>${escapeHtml(name)}</b></span>
       <span class="tool-timer">用时 ${elapsed}s</span>
     `;
   }
   
-  const body = activeToolCard.querySelector('.tool-accordion-body');
+  const body = targetCard.querySelector('.tool-accordion-body');
   if(body){
     const resTitle = document.createElement('div');
     resTitle.className = 'tool-sub-title';
@@ -740,36 +774,14 @@ function logToolResult(result){
     body.appendChild(resBlock);
   }
   
-  const details = activeToolCard.querySelector('.tool-accordion');
-  if(details) details.open = false;
+  const details = targetCard.querySelector('.tool-accordion');
+  if(details) details.open = ok === false;
   
-  activeToolCard = null;
+  if(callId) toolCardsByCallId.delete(callId);
+  if(activeToolCard === targetCard) activeToolCard = null;
   scrollToBottom();
 }
 
-function logThinkingChunk(text){
-  let el = document.getElementById('streamingThinkBlock');
-  if(!el){
-    const log = $('log');
-    const wrap = document.createElement('div');
-    wrap.className = 'entry assistant';
-    wrap.innerHTML = `
-      <div class="idx">ai</div>
-      <div class="rail"></div>
-      <div class="body">
-        <details class="think-box" id="streamingThinkBlock">
-          <summary class="think-summary">思考过程 (Reasoning)</summary>
-          <div class="think-body" id="streamingThinkBody"></div>
-        </details>
-      </div>
-    `;
-    log.appendChild(wrap);
-    el = document.getElementById('streamingThinkBlock');
-  }
-  const body = document.getElementById('streamingThinkBody');
-  if(body) body.textContent += text;
-  scrollToBottom();
-}
 function finalizeThinkBlock(){
   const el = document.getElementById('streamingThinkBlock');
   if(el) el.removeAttribute('id');
@@ -799,13 +811,22 @@ function renderConversation(messages){
     else if(m.role === 'assistant'){
       if(m.tool_calls){
         for(const tc of m.tool_calls){
-          try{ logToolCall(tc.function?.name, JSON.parse(tc.function?.arguments || '{}')); }
-          catch(e){ logToolCall(tc.function?.name || 'tool', {}); }
+          try{ logToolCall(tc.function?.name, JSON.parse(tc.function?.arguments || '{}'), tc.id, true); }
+          catch(e){ logToolCall(tc.function?.name || 'tool', {}, tc.id, true); }
         }
       }
       if(m.content){ logAssistantDelta(m.content); document.getElementById('currentAssistantBlock')?.removeAttribute('id'); }
     }
-    else if(m.role === 'tool') logToolResult(m.content || '');
+    else if(m.role === 'tool'){
+      let ok=true, status='succeeded';
+      try{
+        const parsed=JSON.parse(m.content || '{}');
+        ok=parsed.ok !== false && !parsed.error &&
+          !['failed','error','cancelled','rejected'].includes(String(parsed.status||'').toLowerCase());
+        status=parsed.status || (ok?'succeeded':'failed');
+      }catch(e){ ok=false; status='failed'; }
+      logToolResult(m.content || '', ok, status, m.tool_call_id || null);
+    }
   }
 }
 
@@ -840,6 +861,11 @@ async function send(){
       method:'POST', headers:{'content-type':'application/json'},
       body:JSON.stringify({message:m, task_id:activeTask})
     });
+    if(!r.ok){
+      let detail=r.statusText;
+      try{ const err=await r.json(); detail=err.detail||err.message||detail; }catch(e){}
+      throw new Error(detail);
+    }
     const taskAtSend = activeTask;
     const rd = r.body.getReader(), dec = new TextDecoder(); let buf = '';
     for(;;){
@@ -849,11 +875,10 @@ async function send(){
       for(const l of lines){
         if(!l) continue; const e = JSON.parse(l);
         if(activeTask !== taskAtSend) continue;
-        if(e.type==='thinking') logThinkingChunk(e.text);
-        else if(e.type==='content'){ finalizeThinkBlock(); logAssistantDelta(e.text); }
+        if(e.type==='content'){ finalizeThinkBlock(); logAssistantDelta(e.text); }
         else if(e.type==='tool_call'){ finalizeThinkBlock(); logToolCall(e.name, e.args); }
         else if(e.type==='tool_progress') logToolProgress(e.text);
-        else if(e.type==='tool_result') logToolResult(e.result);
+        else if(e.type==='tool_result') logToolResult(e.result, e.ok, e.status);
         else if(e.type==='done'){
           if(e.usage) $('usage').innerHTML = `tokens <b>${e.usage.total_tokens}</b> · prompt ${e.usage.prompt_tokens} / comp ${e.usage.completion_tokens}`;
         }
@@ -864,7 +889,8 @@ async function send(){
 }
 
 async function stop(){
-  try{ await api('chats/'+(chat||1)+'/stop', {method:'POST'}); }catch(e){}
+  if(!activeTask) return;
+  try{ await api('tasks/'+encodeURIComponent(activeTask)+'/stop', {method:'POST'}); }catch(e){}
 }
 
 /* ---------- Open-Loop Evaluate Cards Renderer ---------- */
@@ -917,6 +943,7 @@ function renderTaskList(){
     const descText = (t.description && t.description !== t.task_id) ? t.description : '';
     return `<div class="task-card ${active?'active':''}" onclick="selectTask('${t.task_id}')">
       <div class="task-card-top">
+        <span class="chip chip-${escapeHtml(t.execution_mode||'adaptive_agent')}">${escapeHtml(t.execution_mode||'adaptive_agent')}</span>
         ${active?'<span class="active-dot"></span>':''}
         <button class="task-del-btn" title="删除任务分支" onclick="deleteTaskBranch('${escapeHtml(t.task_id)}', event)">✕</button>
       </div>
@@ -985,8 +1012,8 @@ function updateTaskbar(d){
   const m = [];
   const card = (b,s)=>`<div class="metric"><b>${b==null?'–':b}</b><span>${s}</span></div>`;
   m.push(card(state.round,'轮次'));
-  m.push(card(state.deployments,'部署'));
-  m.push(card(state.best_cte!=null?Number(state.best_cte).toFixed(4):null,'最佳CTE'));
+  m.push(card(state.round_input_count,'当前数据'));
+  m.push(card(state.clean_count,'清洗结果'));
   $('tbMetrics').innerHTML = m.join('');
 }
 
@@ -995,44 +1022,40 @@ function renderInspector(d, ds){
   const spec = d?.spec||{}, state = d?.state||{}, sess = d?.session||{};
   let html = '';
   
-  if(ds && ds.configured){
-    const comps = ds.source_composition || {};
-    const srcRows = Object.entries(comps).map(([k,v])=>`<div class="kv-row"><div class="k">${escapeHtml(k)}</div><div class="v">${v} 张</div></div>`).join('');
-    html += '<div><div class="sec-title">物理全量数据集 (Workspace)</div><div class="kv">'+
-      `<div class="kv-row"><div class="k">ID</div><div class="v">${escapeHtml(ds.dataset_id||'')}</div></div>`+
-      `<div class="kv-row"><div class="k">总物理样本</div><div class="v">${ds.raw_samples??'?'} 张</div></div></div>`+
-      (srcRows?`<div class="kv" style="margin-top:6px">${srcRows}</div>`:'')+'</div>';
-  }
-
-  const sub = state.dataset_subset;
-  if(sub && Object.keys(sub).length){
-    let subStr = '';
-    if(sub.max_per_source != null){
-      if(typeof sub.max_per_source === 'object'){
-        subStr += Object.entries(sub.max_per_source).map(([k,v])=>`${k}:上限${v}`).join(' · ');
-      } else {
-        subStr += `每源上限 ${sub.max_per_source} 张`;
-      }
-    }
-    if(sub.include_sources) subStr += (subStr?' | ':'') + `仅含: ${sub.include_sources.join(',')}`;
-    if(sub.exclude_sources) subStr += (subStr?' | ':'') + `排除: ${sub.exclude_sources.join(',')}`;
-    html += '<div><div class="sec-title">当前分支数据约束 (Branch Subset)</div><div class="kv">'+
-      `<div class="kv-row"><div class="k">约束采样</div><div class="v">${escapeHtml(subStr||'未限制')}</div></div>`+
-      '</div></div>';
-  }
-  
-  if(sess.goal || sess.hypothesis || sess.status){
-    html += '<div><div class="sec-title">会话记忆 Session</div><div class="kv">';
-    if(sess.status) html += `<div class="kv-row"><div class="k">状态</div><div class="v">${escapeHtml(sess.status)}</div></div>`;
-    if(sess.goal) html += `<div class="kv-row"><div class="k">目标</div><div class="v">${escapeHtml(sess.goal)}</div></div>`;
-    if(sess.hypothesis) html += `<div class="kv-row"><div class="k">假设</div><div class="v">${escapeHtml(sess.hypothesis)}</div></div>`;
-    html += '</div></div>';
-  }
-  
   if(state && Object.keys(state).length){
-    html += '<div><div class="sec-title">状态摘要 State</div><div class="state-grid">';
-    html += `<div class="scard"><b>${state.round??0}</b><span>轮次 round</span></div>`;
-    html += `<div class="scard"><b>${state.deployments??0}</b><span>部署 deployments</span></div>`;
+    const stageLabels = {
+      ready:'等待本轮操作',
+      detector_ready:'检测器已训练',
+      scored:'异常评分已完成',
+      partitioned:'数据分区已完成',
+      resolved:'本轮数据清洗已完成'
+    };
+    const taskGoal = String(sess.goal || spec.description || activeTask || '').trim();
+    const stage = state.termination_required
+      ? '任务已结束'
+      : (stageLabels[state.round_status] || state.round_status || '等待开始');
+    const runs = state.deployment_runs || [];
+    const latestRun = runs.length ? runs[runs.length-1] : null;
+    const collected = latestRun && latestRun.collection_count != null
+      ? latestRun.collection_count
+      : null;
+
+    html += '<div><div class="sec-title">当前目标</div><div class="kv">'
+      + `<div class="kv-row"><div class="v" style="text-align:left">${escapeHtml(taskGoal || '尚未填写任务描述')}</div></div>`
+      + '</div></div>';
+
+    html += '<div><div class="sec-title">当前进度</div><div class="kv">'
+      + `<div class="kv-row"><div class="k">第 ${state.round??0} 轮</div><div class="v">${escapeHtml(stage)}</div></div>`;
+    if(state.active_detector) html += '<div class="kv-row"><div class="k">检测器</div><div class="v">已训练</div></div>';
+    if(state.active_controller) html += '<div class="kv-row"><div class="k">控制器</div><div class="v">已训练</div></div>';
+    if(state.last_deployed_controller) html += '<div class="kv-row"><div class="k">小车部署</div><div class="v">已部署</div></div>';
+    html += '</div></div>';
+
+    html += '<div><div class="sec-title">数据流转</div><div class="state-grid">';
+    html += `<div class="scard"><b>${state.round??0}</b><span>当前轮次</span></div>`;
+    html += `<div class="scard"><b>${state.round_input_count??'–'}</b><span>本轮输入 D_t</span></div>`;
+    html += `<div class="scard"><b>${state.clean_count??'–'}</b><span>清洗结果 C_t</span></div>`;
+    html += `<div class="scard"><b>${collected??'–'}</b><span>新采集 N_t</span></div>`;
     html += '</div></div>';
   }
   
@@ -1093,15 +1116,20 @@ function closeArtifactModal(){ $('artifactModal').hidden = true; }
 
 async function saveSettings(){
   try{
+    const payload={model:$('model').value, base_url:$('base').value,
+      temperature:$('temperature').value, seed:$('seed').value};
+    if($('key').value) payload.api_key=$('key').value;
     await api('settings',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({model:$('model').value, base_url:$('base').value, api_key:$('key').value})});
+      body:JSON.stringify(payload)});
     $('settingsStatus').className='hint ok'; $('settingsStatus').textContent='已保存';
   }catch(e){ $('settingsStatus').className='hint err'; $('settingsStatus').textContent=e.message; }
 }
 async function saveVlmSettings(){
   try{
+    const payload={vlm_model:$('vlmModel').value, vlm_base_url:$('vlmBase').value};
+    if($('vlmKey').value) payload.vlm_api_key=$('vlmKey').value;
     await api('settings',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({vlm_model:$('vlmModel').value, vlm_base_url:$('vlmBase').value, vlm_api_key:$('vlmKey').value})});
+      body:JSON.stringify(payload)});
     $('vlmSettingsStatus').className='hint ok'; $('vlmSettingsStatus').textContent='已保存';
   }catch(e){ $('vlmSettingsStatus').className='hint err'; $('vlmSettingsStatus').textContent=e.message; }
 }
@@ -1112,10 +1140,15 @@ function openTaskModal(){ $('taskModal').hidden = false; }
 function closeTaskModal(){ $('taskModal').hidden = true; }
 async function submitTask(){
   const id = $('nf_id').value.trim();
-  if(!id) return;
+  const description = $('nf_desc').value.trim();
+  if(!id || !description){
+    alert('请填写任务 ID 和任务描述');
+    return;
+  }
   try{
+    const payload={task_id:id, description};
     await api('tasks', {method:'POST', headers:{'content-type':'application/json'},
-      body:JSON.stringify({task_id:id, description:$('nf_desc').value, hypothesis:$('nf_hypothesis').value})});
+      body:JSON.stringify(payload)});
     closeTaskModal(); await loadTasks(); await selectTask(id);
   }catch(e){ alert(e.message); }
 }

@@ -2,7 +2,9 @@ import json
 from pathlib import Path
 import numpy as np
 from .base import Tool
-from .utils import _load, _save, _ensure_constraints, record_observation, append_ledger
+from .decision_policy import effective_action, record_decision
+from .utils import (_load, _save, _ensure_constraints, record_observation,
+                    append_ledger, _task_artifact_reference)
 
 
 class Partition(Tool):
@@ -16,27 +18,40 @@ class Partition(Tool):
         "properties": {
             "threshold": {
                 "type": "number",
-                "description": "Partitioning threshold value. Omit to run candidate analysis only.",
+                "description": "Keep/gray lower threshold. Omit to run candidate analysis only.",
+            },
+            "gray_upper_threshold": {
+                "type": "number",
+                "description": "Optional gray/discard upper threshold. Scores at or above it are confident detector discards and are not sent to VLM.",
+            },
+            "rationale": {
+                "type": "string",
+                "description": "Required when applying a split: concise reason grounded in returned score statistics/candidates."
             },
         },
         "required": [],
     }
 
-    def run(self, threshold=None, branch="main", workspace_dir=None, **_):
+    def run(self, threshold=None, gray_upper_threshold=None, rationale=None,
+            branch="main", workspace_dir=None, **_):
         s = _load(workspace_dir, branch=branch)
         _ensure_constraints(s, branch)
+        if s.get("round_status") not in ("scored", "partitioned"):
+            raise ValueError("Partition requires current-round scores and cannot run after resolution")
         if not s.get("latest_scores"):
             raise ValueError("No scores file found. Run score_and_fit before partition.")
-        rec = json.loads(Path(s["latest_scores"]).read_text())
+        if s.get("score_round") not in (None, s.get("round")):
+            raise ValueError("Score artifact belongs to a different round")
+        score_path = _task_artifact_reference(
+            workspace_dir, branch, s["latest_scores"]
+        )
+        rec = json.loads(score_path.read_text())
         scores = np.array([r["anomaly_score"] for r in rec], dtype=float)
+        if len(scores) == 0 or not np.all(np.isfinite(scores)):
+            raise ValueError("Score artifact is empty or contains non-finite anomaly scores")
 
         candidates = self._compute_candidates(scores)
         stats = self._score_stats(scores)
-
-        c = s.get("constraints") or {}
-        locked_thr = c.get("locked_threshold")
-        if locked_thr is not None and threshold is None:
-            threshold = float(locked_thr)
 
         if threshold is None:
             summary = {
@@ -45,34 +60,112 @@ class Partition(Tool):
                 "candidates": candidates,
                 "score_stats": stats,
             }
-            record_observation(s, "partition", summary)
+            record_observation(s, "partition", summary, workspace_dir=workspace_dir, branch=branch)
             _save(workspace_dir, s, branch=branch)
             return json.dumps(summary, ensure_ascii=False)
 
-        thr = float(threshold)
+        proposed = {
+            "threshold": float(threshold),
+            "gray_upper_threshold": (
+                None if gray_upper_threshold is None else float(gray_upper_threshold)
+            ),
+        }
+        effective, source = effective_action(s, "partition", proposed)
+        method = "agent_selected"
+        if source == "fixed_policy":
+            rule = effective.get("rule", "fixed")
+            method = f"fixed:{rule}"
+            if rule == "fixed":
+                if effective.get("value") is None:
+                    raise ValueError("fixed partition rule requires value")
+                thr = float(effective["value"])
+            elif rule == "mean_std":
+                thr = float(candidates["mean_plus_std_threshold"])
+            elif rule == "otsu":
+                thr = float(candidates["otsu_threshold"])
+            elif rule == "kde_valley":
+                if candidates["kde_valley_threshold"] is None:
+                    raise ValueError("Fixed KDE baseline is undefined for this score distribution")
+                thr = float(candidates["kde_valley_threshold"])
+            else:
+                raise ValueError(f"Unknown fixed partition rule: {rule}")
+            upper_rule = effective.get("gray_upper_rule", "none")
+            if upper_rule == "none":
+                upper = None
+            elif upper_rule == "fixed":
+                if effective.get("gray_upper_value") is None:
+                    raise ValueError("fixed gray upper rule requires gray_upper_value")
+                upper = float(effective["gray_upper_value"])
+            elif upper_rule == "mean_plus_2std":
+                upper = float(np.mean(scores) + 2.0 * np.std(scores))
+            elif upper_rule == "quantile":
+                q = float(effective.get("gray_upper_quantile", 0.95))
+                if not 0 < q < 1:
+                    raise ValueError("gray_upper_quantile must be in (0, 1)")
+                upper = float(np.quantile(scores, q))
+            else:
+                raise ValueError(f"Unknown fixed gray upper rule: {upper_rule}")
+            effective = {**effective, "threshold": thr, "gray_upper_threshold": upper}
+            rationale = rationale or f"Preregistered fixed baseline rule: {rule}"
+        else:
+            thr = float(effective["threshold"])
+            upper = effective.get("gray_upper_threshold")
+            upper = None if upper is None else float(upper)
+            if not rationale or not str(rationale).strip():
+                raise ValueError("Adaptive partition decisions require an observation-based rationale")
+        if not np.isfinite(thr):
+            raise ValueError("threshold must be finite")
+        if upper is not None and (not np.isfinite(upper) or upper <= thr):
+            raise ValueError("gray_upper_threshold must be finite and greater than threshold")
         keep = [r for r in rec if r["anomaly_score"] < thr]
-        gray = [r for r in rec if r["anomaly_score"] >= thr]
+        gray = [
+            r for r in rec
+            if r["anomaly_score"] >= thr and (upper is None or r["anomaly_score"] < upper)
+        ]
+        discard = [] if upper is None else [r for r in rec if r["anomaly_score"] >= upper]
         s["latest_partition"] = {
             "threshold": round(thr, 5),
-            "keep": keep,
-            "gray": gray,
+            "gray_upper_threshold": None if upper is None else round(upper, 5),
+            "threshold_method": method,
+            "keep_ids": [r["id"] for r in keep],
+            "gray_ids": [r["id"] for r in gray],
+            "discard_ids": [r["id"] for r in discard],
+            "keep_count": len(keep),
+            "gray_count": len(gray),
+            "discard_count": len(discard),
+            "scores_artifact": s.get("latest_scores"),
         }
+        s["round_status"] = "partitioned"
+        record_decision(
+            s,
+            "partition",
+            proposed,
+            effective,
+            str(rationale),
+            source,
+            observation={"candidates": candidates, "score_stats": stats},
+        )
         summary = {
             "mode": "split",
             "threshold_applied": round(thr, 5),
             "keep_count": int(len(keep)),
             "gray_count": int(len(gray)),
+            "discard_count": int(len(discard)),
             "keep_ratio": round(len(keep) / max(1, len(rec)), 5),
+            "gray_upper_threshold": None if upper is None else round(upper, 5),
+            "threshold_method": method,
+            "decision_source": source,
             "candidates": candidates,
             "score_stats": stats,
         }
-        record_observation(s, "partition", summary)
+        record_observation(s, "partition", summary, workspace_dir=workspace_dir, branch=branch)
         append_ledger(s, {
             "stage": "partition",
             "round": s.get("round"),
             "threshold": round(thr, 5),
             "keep": int(len(keep)),
             "gray": int(len(gray)),
+            "discard": int(len(discard)),
         })
         _save(workspace_dir, s, branch=branch)
         return json.dumps(summary, ensure_ascii=False)
@@ -115,9 +208,12 @@ class Partition(Tool):
             return None
         if len(scores) < 8:
             return None
-        kde = gaussian_kde(scores)
-        xs = np.linspace(float(scores.min()), float(scores.max()), 500)
-        d = kde(xs)
+        try:
+            kde = gaussian_kde(scores)
+            xs = np.linspace(float(scores.min()), float(scores.max()), 500)
+            d = kde(xs)
+        except Exception:
+            return None
         order = 5
         mins = []
         for i in range(order, len(d) - order):
@@ -143,8 +239,10 @@ class Partition(Tool):
         n = len(scores)
         if n < 8:
             return None
-        g1 = float(skew(scores))
-        g2 = float(kurtosis(scores, fisher=False))
+        g1 = float(skew(scores, bias=False))
+        # The finite-sample BC formula expects excess kurtosis here. Using
+        # Pearson kurtosis and then adding the correction double-counted 3.
+        g2 = float(kurtosis(scores, fisher=True, bias=False))
         if n > 3:
             denom = g2 + 3.0 * (n - 1) ** 2 / ((n - 2) * (n - 3))
         else:

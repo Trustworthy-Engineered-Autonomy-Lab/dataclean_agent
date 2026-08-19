@@ -1,7 +1,11 @@
 import json
+import os
 import re
 from pathlib import Path
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except ImportError:  # Core dataset/state tools can run without VLM dependencies.
+    OpenAI = None
 
 VLLM_BASE_URL = "http://localhost:8000/v1"
 VLLM_MODEL_NAME = "./models/Qwen3-VL-8B-Instruct"
@@ -29,13 +33,15 @@ def resolve_vlm_config(model=None, base_url=None, api_key=None, state_vlm=None):
     sv = state_vlm or {}
     st = _vlm_settings()
     return {
-        "model":    model or sv.get("model") or st.get("vlm_model") or VLLM_MODEL_NAME,
-        "base_url": base_url or sv.get("base_url") or st.get("vlm_base_url") or VLLM_BASE_URL,
-        "api_key":  api_key or sv.get("api_key") or st.get("vlm_api_key") or DEFAULT_VLM_API_KEY,
+        "model":    model or sv.get("model") or os.environ.get("DATACLEAN_VLM_MODEL") or st.get("vlm_model") or VLLM_MODEL_NAME,
+        "base_url": base_url or sv.get("base_url") or os.environ.get("DATACLEAN_VLM_BASE_URL") or st.get("vlm_base_url") or VLLM_BASE_URL,
+        "api_key":  api_key or os.environ.get("DATACLEAN_VLM_API_KEY") or st.get("vlm_api_key") or DEFAULT_VLM_API_KEY,
     }
 
 
 def _get_vlm_client(cfg=None):
+    if OpenAI is None:
+        raise RuntimeError("The openai package is required for VLM review")
     if cfg is None:
         cfg = resolve_vlm_config()
     return OpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"])
@@ -53,9 +59,9 @@ def _steering_to_text(steering: float) -> str:
 
 def _build_vlm_prompt(steering: float) -> str:
     steering_desc = _steering_to_text(steering)
-    return f"""You are a strict quality inspector for autonomous driving training datasets. Your task is to evaluate whether the image and steering action pair is clean enough for high-quality imitation learning dataset curation.
+    return f"""You are a conservative reviewer for autonomous-driving image/action data. Assess only evidence visible in this single frame. Do not mark rare turns or obstacle avoidance anomalous merely because the steering magnitude is large. If temporal context, speed, calibration, or road geometry is insufficient to justify either decision, return unresolved.
 
-Context: Data is sourced from CARLA simulator including urban driving, lane changes, intersections, parked vehicles, and diverse weather conditions. This sample is flagged as a candidate anomaly. Determine if it meets quality standards. When in doubt, reject it.
+Context: Data may include CARLA or physical-car driving, urban roads, lane changes, intersections, parked vehicles, and diverse weather. The sample was selected by an unsupervised detector and is not known to be anomalous.
 
 Steering Command: {steering_desc} (range [-1, 1], negative=left, positive=right)
 
@@ -64,8 +70,8 @@ Return JSON format strictly without extra text:
   "road_geometry": "straight|curve_left|curve_right|intersection|other",
   "car_position": "centered|slightly_off|adjacent_lane|off_road",
   "steering_justified": true|false,
-  "label": "normal|anomalous",
-  "anomaly_type": "none|visibility_failure|erratic_action|environmental_violation",
+  "label": "normal|anomalous|unresolved",
+  "anomaly_type": "none|visibility_failure|erratic_action|environmental_violation|ambiguous_context",
   "confidence": "high|medium|low",
   "reasoning": "<concise reason for acceptance or rejection>"
 }}"""
@@ -75,12 +81,16 @@ def _parse_vlm_response(result_text: str):
     cleaned = re.sub(r"```(?:json)?", "", result_text).strip()
     json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
     if not json_match:
-        return "anomalous", "low", {"reasoning": "Failed to parse JSON response"}
+        return "unresolved", "low", {"reasoning": "Failed to parse JSON response"}
     try:
         data = json.loads(json_match.group())
     except json.JSONDecodeError:
-        return "anomalous", "low", {"reasoning": "JSON decode error"}
+        return "unresolved", "low", {"reasoning": "JSON decode error"}
 
-    label_str = data.get("label", "anomalous").lower()
-    conf_str = data.get("confidence", "low").lower()
+    label_str = str(data.get("label", "unresolved")).lower()
+    conf_str = str(data.get("confidence", "low")).lower()
+    if label_str not in {"normal", "anomalous", "unresolved"}:
+        label_str = "unresolved"
+    if conf_str not in {"high", "medium", "low"}:
+        conf_str = "low"
     return label_str, conf_str, data

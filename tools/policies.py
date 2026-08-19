@@ -1,9 +1,9 @@
 POLICIES = {
     "score": {
-        "composite_stats": "Composite anomaly score based on mean/std",
+        "robust_composite": "Within-round robust composite of image reconstruction and image-to-steering prediction errors",
     },
     "partition": {
-        "data_driven": "Unsupervised two-step partition: Step 1 (no threshold) returns Otsu/KDE valley/bimodal coefficient candidates + BC scalar + score stats; Step 2 specifies threshold to execute partition.",
+        "data_driven": "Unsupervised two-step partition: analyze candidates, then choose keep/gray lower threshold and optional gray/discard upper threshold.",
     },
     "resolve": {
         "vlm": "Gray zone reviewed by local VLM, keep + accepted samples form clean dataset",
@@ -16,26 +16,32 @@ POLICIES = {
     "train_detector": {
         "retrain": "Retrain detector every round",
         "reuse": "Reuse detector from previous round",
+        "retrain_first_then_reuse": "Train on D_0, then reuse the same detector in later rounds",
     },
     "train_controller": {
         "default": "Default controller training policy",
     },
     "deploy": {
-        "cte_proxy": "Deterministic proxy CTE for evaluation",
+        "simulation_smoke_test": "Non-scientific deterministic controller smoke-test proxy",
+    },
+    "transition": {
+        "clean_only": "Commit D_(t+1)=C_t",
+        "deploy_collect_merge": "Commit D_(t+1)=C_t union newly collected N_t",
     },
 }
 
 DEFAULT_PIPELINE = {
     "train_detector": "retrain",
-    "score": "composite_stats",
+    "score": "robust_composite",
     "partition": "data_driven",
     "resolve": "vlm",
     "evaluate": "openloop",
     "train_controller": "default",
-    "deploy": "cte_proxy",
+    "deploy": "simulation_smoke_test",
+    "transition": "clean_only",
 }
 
-STAGE_ORDER = ["train_detector", "score", "partition", "resolve", "evaluate", "train_controller", "deploy"]
+STAGE_ORDER = ["train_detector", "score", "partition", "resolve", "evaluate", "train_controller", "deploy", "transition"]
 
 STAGE_LABEL = {
     "train_detector": "Detector Training",
@@ -45,6 +51,7 @@ STAGE_LABEL = {
     "evaluate": "Open-Loop Evaluation",
     "train_controller": "Controller Training",
     "deploy": "Deployment",
+    "transition": "Next-round Dataset Commit",
 }
 
 TASK_TYPES = ["threshold_ablation", "detector_ablation", "agent_vs_baseline", "custom"]
@@ -63,7 +70,7 @@ TASK_TYPE_DESC = {
 }
 
 LEDGER_FIELDS = {
-    "partition": [("threshold", "th"), ("keep", "keep"), ("gray", "gray")],
+    "partition": [("threshold", "th"), ("keep", "keep"), ("gray", "gray"), ("discard", "discard")],
     "evaluate": [("target", "eval"), ("threshold", "th"), ("n_samples", "n")],
 }
 

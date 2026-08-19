@@ -27,7 +27,7 @@ class Tool:
                 }
             }
             for tool_cls in cls._registry.values()
-            if tool_cls.name
+            if tool_cls.name and getattr(tool_cls, "agent_exposed", True)
         ]
 
     def run(self, **kwargs):

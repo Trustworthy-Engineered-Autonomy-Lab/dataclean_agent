@@ -34,6 +34,8 @@ class ListTasks(Tool):
             summary = {
                 "task_id": task_id,
                 "description": spec.get("description", ""),
+                "execution_mode": spec.get("execution_mode", "adaptive_agent"),
+                "transition_policy": spec.get("transition_policy", "clean_only"),
                 "configured": False,
                 "round": None,
                 "deployments": None,
@@ -47,7 +49,9 @@ class ListTasks(Tool):
                     summary["round"] = s.get("round")
                     summary["deployments"] = s.get("deployments")
                     summary["clean_count"] = s.get("clean_count")
-                    summary["best_cte"] = s.get("best_cte")
+                    summary["round_status"] = s.get("round_status")
+                    summary["task_status"] = s.get("task_status", "DRAFT")
+                    summary["round_input_count"] = s.get("round_input_count")
                 except Exception:
                     pass
             out.append(summary)

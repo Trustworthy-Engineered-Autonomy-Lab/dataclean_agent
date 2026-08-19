@@ -4,6 +4,10 @@ from .io import _load_session, _save_session
 
 class NoteSession(Tool):
     name = "note_session"
+    # Structured proposal/outcome records now provide the durable policy memory.
+    # Keep this legacy utility callable by trusted code, but do not let the Agent
+    # bypass the auditable belief-update protocol with free-form session edits.
+    agent_exposed = False
     description = (
         "Read and update per-task session working memory (goal, hypothesis, open questions, learnings, status). "
         "Omit all parameters to perform a read-only query of session memory."
