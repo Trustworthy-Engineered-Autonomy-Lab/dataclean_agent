@@ -22,7 +22,6 @@ from .list_tasks import ListTasks
 from .partition import Partition
 from .commit_round import CommitRound
 from .assess_stopping import AssessStopping
-from .deploy_eval import DeployEval
 from .set_constraints import SetConstraints
 from .note_session import NoteSession
 
@@ -57,7 +56,7 @@ def optional_dependency_errors():
 
 __all__ = [
     "Tool", "ConfigureDataset", "ConfigureTaskDataset", "PipelineState", "DefineTask", "ListTasks",
-    "Partition", "CommitRound", "AssessStopping", "DeployEval", "SetConstraints",
+    "Partition", "CommitRound", "AssessStopping", "SetConstraints",
     "ProposeExperimentEpisode", "AssessExperimentEpisode", "ReconcileInterruptedAction",
     "WithdrawExperimentEpisode",
     "NoteSession", "optional_dependency_errors",
