@@ -57,7 +57,7 @@ def _cte_metrics(path):
     if not rows:
         raise ValueError("CTE CSV is empty")
     header = [cell.strip().lower().replace("-", "_").replace(" ", "_") for cell in rows[0]]
-    names = {"cte", "cross_track_error", "crosstrack_error", "lateral_error"}
+    names = {"cte_mm", "cross_track_error", "crosstrack_error", "lateral_error"}
     indexes = [i for i, name in enumerate(header) if name in names]
     if indexes:
         column, data_rows = indexes[0], rows[1:]

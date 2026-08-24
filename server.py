@@ -16,7 +16,7 @@ from tools.policies import (describe_task_types, describe_default_pipeline,
 from doctor import _module_status
 
 HOST = os.environ.get("DATACLEAN_HOST", "127.0.0.1")
-PORT = int(os.environ.get("DATACLEAN_PORT", "8766"))
+PORT = int(os.environ.get("DATACLEAN_PORT", "8799"))
 HERE = Path(__file__).parent
 SETTINGS = HERE / "settings.json"
 STATIC = HERE / "frontend"

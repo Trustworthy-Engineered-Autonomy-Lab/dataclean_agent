@@ -1,10 +1,10 @@
 {
-  "model": "",
-  "base_url": "http://localhost:8000/v1",
-  "api_key": "",
+  "model": "gpt-4o",
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "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",
   "temperature": 0.0,
   "seed": null,
-  "vlm_model": "",
+  "vlm_model": "Qwen/Qwen3.5-35B-A3B",
   "vlm_base_url": "http://localhost:8000/v1",
-  "vlm_api_key": ""
+  "vlm_api_key": "12"
 }
