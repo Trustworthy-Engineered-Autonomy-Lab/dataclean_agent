@@ -63,11 +63,18 @@ class DeployController(Tool):
                     print_progress(f"[DeployController] Uploading {source_path.name} -> {target_path}...")
                     sftp.put(str(source_path), str(target_path))
 
-                    data_file = source_path.parent / (source_path.name + ".data")
-                    if data_file.exists():
-                        target_data_path = Path(CONTROLLER_TARGET_DIR) / data_file.name
-                        print_progress(f"[DeployController] Uploading companion data {data_file.name}...")
-                        sftp.put(str(data_file), str(target_data_path))
+                    data_candidates = [
+                        source_path.with_name(source_path.name + ".data"),
+                        source_path.with_name(source_path.name + ".tmp.data"),
+                    ]
+
+                    for data_file in data_candidates:
+                        if data_file.exists():
+                            target_data_path = PurePosixPath(CONTROLLER_TARGET_DIR) / data_file.name
+                            print_progress(
+                                f"[DeployController] Uploading companion data {data_file.name}..."
+                            )
+                            sftp.put(str(data_file), str(target_data_path))
 
         except Exception as e:
             res = {"status": "failed", "error": f"Failed to deploy {source_path.name}: {e}"}

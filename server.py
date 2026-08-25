@@ -16,7 +16,7 @@ from tools.policies import (describe_task_types, describe_default_pipeline,
 from doctor import _module_status
 
 HOST = os.environ.get("DATACLEAN_HOST", "127.0.0.1")
-PORT = int(os.environ.get("DATACLEAN_PORT", "8766"))
+PORT = int(os.environ.get("DATACLEAN_PORT", "8799"))
 HERE = Path(__file__).parent
 SETTINGS = HERE / "settings.json"
 STATIC = HERE / "frontend"
@@ -233,9 +233,8 @@ Research contract:
 - Treat a structured tool result with status=failed/error/cancelled/rejected as a failed action. Inspect and replan; never describe it as completed.
 - Within one user turn, never retry a failed operation by changing only rationale/request_basis. In a later turn, an explicit user retry instruction is new authority: call the tool again even with identical operational arguments instead of refusing from conversation history.
 - Every Agent tool result uses {ok,status,code,data,error,retryable,state_changed,artifact_refs}. Read domain output from data; use top-level ok/status as the only execution-success signal.
-- deploy_eval is only a synthetic smoke-test proxy. It is not measured CTE, does not count as deployment, and cannot support a scientific claim.
 
-Working style: communicate naturally and concisely in Chinese; inspect current state before consequential actions; report evidence rather than invented metrics; avoid ritualistic restatement of every stage.""".replace("{path}", str(path))
+Working style: communicate naturally and concisely in English; inspect current state before consequential actions; report evidence rather than invented metrics; avoid ritualistic restatement of every stage.""".replace("{path}", str(path))
 
 
 @app.get("/api/workspace")

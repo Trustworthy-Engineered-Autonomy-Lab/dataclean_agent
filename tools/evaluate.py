@@ -363,9 +363,9 @@ class Evaluate(Tool):
         spath, scored = self._load_scores(workspace_dir, branch, detector_id, s)
         scored_map = {r["id"]: r for r in scored}
         recs, target_label = self._target_records(scored_map, s, target, branch, workspace_dir)
-        target_label_zh = {"full": "\u5168\u5206\u6570\u96c6",
-                           "keep": "detector \u4fdd\u7559\u533a(keep)",
-                           "cleandata": "\u6700\u7ec8\u6e05\u6d17\u96c6(cleandata)"}[target]
+        target_label_en = {"full": "Full Scored Set",
+                           "keep": "Detector Keep Region (keep)",
+                           "cleandata": "Final Clean Set (cleandata)"}[target]
 
         part = s.get("latest_partition") or {}
         part_threshold = part.get("threshold")
@@ -458,14 +458,14 @@ class Evaluate(Tool):
             full_auc = round(float(roc_auc_score(full_label[known], full_score[known])), 5)
         else:
             full_auc = None
-        plot_title = (f"Anomaly Score \u2014 full distribution"
+        plot_title = (f"Anomaly Score — full distribution"
                       f" (target={target_label}, threshold={threshold_label}, full AUC={_fmt(full_auc)})")
         self._plot_scatter(scored, full_score, full_label, threshold, threshold_label,
                            plot_title, scatter, alpha)
 
         summary = {
             "target": target,
-            "target_label": target_label_zh,
+            "target_label": target_label_en,
             "n_samples": res["n_samples"],
             "threshold_label": threshold_label,
             "artifacts": {
