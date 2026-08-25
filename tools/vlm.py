@@ -59,21 +59,48 @@ def _steering_to_text(steering: float) -> str:
 
 def _build_vlm_prompt(steering: float) -> str:
     steering_desc = _steering_to_text(steering)
-    return f"""You are a conservative reviewer for autonomous-driving image/action data. Assess only evidence visible in this single frame. Do not mark rare turns or obstacle avoidance anomalous merely because the steering magnitude is large. If temporal context, speed, calibration, or road geometry is insufficient to justify either decision, return unresolved.
+    return f"""You are a conservative auditor for autonomous-driving image/action data. Assess only evidence visible in this single frame. Do not mark rare turns or obstacle avoidance anomalous merely because the steering magnitude is large. If temporal context, speed, calibration, or road geometry is insufficient to justify either decision, return unresolved.
 
-Context: Data may include CARLA or physical-car driving, urban roads, lane changes, intersections, parked vehicles, and diverse weather. The sample was selected by an unsupervised detector and is not known to be anomalous.
+Context: Data may include CARLA or physical-car driving, urban roads, lane changes, intersections, obstacles, parked vehicles, and diverse weather. The sample was selected by an unsupervised detector and is not known to be anomalous.
 
-Steering Command: {steering_desc} (range [-1, 1], negative=left, positive=right)
+DECISION LOGIC (in order):
+
+Step 1 - Obstacle analysis:
+  Is there an obstacle/hazard on the drivable path? Assess proximity:
+    NONE   : no obstacle or off to the side / not blocking
+    FAR    : visible but distant (upper third, small, not imminent)
+    NEAR   : large and close, occupying lower/central area, imminent threat
+
+Step 2 - Road/lane geometry:
+  Analyze the road structure in the LOWER-MIDDLE of image (nearest the car):
+    Position: far_left / left / center / right / far_right
+    Heading : curves_left / straight / curves_right
+
+Step 3 - Expected steering:
+  Determine the plausible steering range given the scene:
+    No/far obstacle + center lane     -> ~[-0.2, +0.2]  (follow line)
+    No/far obstacle + left lane       -> ~[-0.6, -0.15] (follow line)
+    No/far obstacle + right lane      -> ~[+0.15, +0.6] (follow line)
+    NEAR obstacle (typical avoidance) -> ~[+0.6, +1.0] or ~[-1.0, -0.6] (open side)
+    Steering with SAME sign as expected direction OR within ±0.3 = PLAUSIBLE
+
+Step 4 - Consistency verdict (be LENIENT):
+  CONSISTENT   : recorded steering falls in expected range or has correct sign
+  MISBEHAVIOR  : opposite sign to expected direction with clear scene cue,
+                 OR grossly wrong (e.g., straight into near obstacle)
+  UNCERTAIN    : borderline, ambiguous geometry, or poor visibility
+
+Recorded steering: {steering_desc} (range [-1, 1], negative=left, positive=right)
 
 Return JSON format strictly without extra text:
 {{
-  "road_geometry": "straight|curve_left|curve_right|intersection|other",
-  "car_position": "centered|slightly_off|adjacent_lane|off_road",
+  "obstacle": {{"present": true/false, "proximity": "none|far|near", "position": "left|center|right"}},
+  "road_geometry": {{"visible": true/false, "position": "far_left|left|center|right|far_right", "heading": "curves_left|straight|curves_right"}},
+  "expected_steering_range": [min, max],
   "steering_justified": true|false,
   "label": "normal|anomalous|unresolved",
-  "anomaly_type": "none|visibility_failure|erratic_action|environmental_violation|ambiguous_context",
   "confidence": "high|medium|low",
-  "reasoning": "<concise reason for acceptance or rejection>"
+  "reasoning": "<one sentence: obstacle proximity, geometry, and steering consistency>"
 }}"""
 
 
@@ -93,4 +120,6 @@ def _parse_vlm_response(result_text: str):
         label_str = "unresolved"
     if conf_str not in {"high", "medium", "low"}:
         conf_str = "low"
-    return label_str, conf_str, data
+
+    reasoning = data.get("reasoning", "VLM assessment")
+    return label_str, conf_str, {"reasoning": reasoning, **data}
