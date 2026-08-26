@@ -2,7 +2,6 @@ import json
 from .base import Tool
 from .utils import (
     _anonymize_source_name,
-    _d5,
     _dataset_config,
     _load,
     _load_task_spec,
@@ -84,6 +83,13 @@ class PipelineState(Tool):
         raw_comp = (ds or {}).get("source_composition")
         if raw_comp and isinstance(raw_comp, dict):
             raw_comp = {_anonymize_source_name(k): v for k, v in raw_comp.items()}
+        internal_task_status = s.get("task_status", "DRAFT")
+        dataset_editable = internal_task_status == "DRAFT"
+        execution_status = (
+            "completed"
+            if internal_task_status == "COMPLETED"
+            else ("not_started" if dataset_editable else "started")
+        )
 
         out = {
             "state_schema_version": s.get("schema_version", 1),
@@ -100,7 +106,16 @@ class PipelineState(Tool):
                 "default_transition_policy": s.get("default_transition_policy", spec.get("transition_policy", "clean_only")),
             },
             "round": s.get("round", 0),
-            "task_status": s.get("task_status", "DRAFT"),
+            # DRAFT/LOCKED/RUNNING are internal transaction states. Expose the
+            # user-relevant capability instead so the model cannot invent a
+            # manual task-locking ritual.
+            "dataset_configuration": {
+                "status": "editable" if dataset_editable else "frozen",
+                "editable": dataset_editable,
+                "freezes_automatically_on_first_experimental_action": True,
+            },
+            "execution_status": execution_status,
+            "task_completed": internal_task_status == "COMPLETED",
             "round_status": s.get("round_status", "ready"),
             "deployments": s.get("deployments", 0),
             "active_detector": s.get("active_detector"),
@@ -130,7 +145,6 @@ class PipelineState(Tool):
             "constraints": _agent_visible_projection(
                 s.get("constraints") or {}, hide_cte=hide_cte
             ),
-            "decision_gate": _d5(s),
             "latest_observation": _agent_visible_projection(
                 s.get("latest_observation") or {}, hide_cte=hide_cte
             ),

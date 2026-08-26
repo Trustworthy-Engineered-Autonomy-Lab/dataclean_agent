@@ -21,8 +21,14 @@ POLICIES = {
     "train_controller": {
         "default": "Default controller training policy",
     },
-    "deploy": {
-        "simulation_smoke_test": "Non-scientific deterministic controller smoke-test proxy",
+    "deploy_controller": {
+        "physical_upload": "Upload the trained ONNX controller to the configured physical car host",
+    },
+    "eval_controller": {
+        "physical_collect": "Run the deployed controller on the car and collect a task-local evaluation dataset",
+    },
+    "transfer_eval_results": {
+        "collection_artifact": "Transfer the car evaluation dataset back as a verified CollectionArtifact",
     },
     "transition": {
         "clean_only": "Commit D_(t+1)=C_t",
@@ -37,11 +43,16 @@ DEFAULT_PIPELINE = {
     "resolve": "vlm",
     "evaluate": "openloop",
     "train_controller": "default",
-    "deploy": "simulation_smoke_test",
+    "deploy_controller": "physical_upload",
+    "eval_controller": "physical_collect",
+    "transfer_eval_results": "collection_artifact",
     "transition": "clean_only",
 }
 
-STAGE_ORDER = ["train_detector", "score", "partition", "resolve", "evaluate", "train_controller", "deploy", "transition"]
+STAGE_ORDER = [
+    "train_detector", "score", "partition", "resolve", "evaluate", "train_controller",
+    "deploy_controller", "eval_controller", "transfer_eval_results", "transition",
+]
 
 STAGE_LABEL = {
     "train_detector": "Detector Training",
@@ -50,7 +61,9 @@ STAGE_LABEL = {
     "resolve": "Resolve Clean Dataset",
     "evaluate": "Open-Loop Evaluation",
     "train_controller": "Controller Training",
-    "deploy": "Deployment",
+    "deploy_controller": "Physical Controller Deployment",
+    "eval_controller": "Physical Car Evaluation and Collection",
+    "transfer_eval_results": "Evaluation Dataset Transfer",
     "transition": "Next-round Dataset Commit",
 }
 

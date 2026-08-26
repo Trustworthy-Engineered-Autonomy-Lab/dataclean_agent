@@ -12,6 +12,9 @@ from torch.utils.data import DataLoader, random_split
 from .base import Tool
 from .decision_policy import effective_action, record_decision
 from .models import ControllerCNN, ControllerDeploymentWrapper
+from .image_contract import (
+    IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS, INPUT_CONTRACT_VERSION,
+)
 from .utils import (_load, _save, _artifact, record_observation, DrivingDataset,
                     print_progress, _ensure_constraints, _task_artifact_reference,
                     _load_dataset_snapshot)
@@ -210,7 +213,9 @@ class TrainController(Tool):
             model_cpu.load_state_dict(model.state_dict())
             model_cpu.eval()
             deployment_model = ControllerDeploymentWrapper(model_cpu).eval()
-            dummy_input = torch.zeros(1, 144, 224, 3, dtype=torch.float32)
+            dummy_input = torch.zeros(
+                1, IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS, dtype=torch.float32
+            )
             try:
                 torch.onnx.export(
                     deployment_model,
@@ -249,7 +254,12 @@ class TrainController(Tool):
             "controller_epochs_used_total": s.get("controller_train_epochs_used", 0),
             "weights_pt_artifact": ckpt_path.name,
             "weights_onnx_artifact": onnx_path.name,
-            "onnx_input_contract": "float32 NHWC [N,144,224,3], pixel range [0,255]",
+            "onnx_input_contract": (
+                f"float32 NHWC [N,{IMAGE_HEIGHT},{IMAGE_WIDTH},{IMAGE_CHANNELS}], "
+                "pixel range [0,255]"
+            ),
+            "onnx_input_shape": [IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS],
+            "input_contract_version": INPUT_CONTRACT_VERSION,
         }
         
         ctrl_info = {
@@ -261,11 +271,18 @@ class TrainController(Tool):
             "weights_onnx": str(onnx_path)
         }
         s["active_controller"] = ctrl_info
-        record_decision(
+        decision_entry = record_decision(
             s, "controller", proposed, effective, rationale, decision_source,
             observation={"clean_count": len(data), "best_validation_mse": round(best_val_loss, 5)},
         )
-        record_observation(s, "train_controller", ctrl_info, workspace_dir=workspace_dir, branch=branch)
+        record_observation(
+            s,
+            "train_controller",
+            ctrl_info,
+            workspace_dir=workspace_dir,
+            branch=branch,
+            decision=decision_entry,
+        )
         _save(workspace_dir, s, branch=branch)
         
         return json.dumps({"controller_id": cid, "metrics": metrics, "branch": branch}, ensure_ascii=False)

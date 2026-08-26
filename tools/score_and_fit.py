@@ -7,6 +7,9 @@ from torch.utils.data import DataLoader
 from .base import Tool
 from .decision_policy import effective_action, record_decision
 from .models import UnifiedCAE, calculate_pcc_tensor
+from .image_contract import (
+    IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH, INPUT_CONTRACT_VERSION,
+)
 from .utils import _load, _save, _artifact, _records, _quantiles, _combined_score, record_observation, DrivingDataset, print_progress, _dataset_config, _write_json_atomic
 
 class ScoreAndFit(Tool):
@@ -48,6 +51,16 @@ class ScoreAndFit(Tool):
         target_detector = detector_id or s.get("active_detector")
         if not target_detector:
             raise ValueError("No detector_id specified and no active_detector active.")
+        detector_meta = s.get("detector") or {}
+        if (
+            detector_meta.get("id") != target_detector
+            or detector_meta.get("input_shape") != [IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH]
+            or detector_meta.get("input_contract_version") != INPUT_CONTRACT_VERSION
+        ):
+            raise ValueError(
+                "Detector checkpoint is not compatible with the current 224x224 input "
+                "contract. Retrain the detector before scoring."
+            )
 
         ckpt_path = _artifact(workspace_dir, f"{target_detector}.pt", branch=branch)
         if not ckpt_path.exists():
@@ -106,10 +119,12 @@ class ScoreAndFit(Tool):
             "stats": {"mean": round(s_mean, 5), "std": round(s_std, 5)},
             "high_abs_steering_count": int(np.sum(np.abs([r['steering'] for r in records]) >= .35)),
             "score_artifact": path.name,
+            "input_shape": [IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH],
+            "input_contract_version": INPUT_CONTRACT_VERSION,
             "device": str(device),
             "duration_seconds": round(time.monotonic() - started, 6),
         }
-        record_decision(
+        decision_entry = record_decision(
             s,
             "score",
             proposed,
@@ -123,6 +138,9 @@ class ScoreAndFit(Tool):
         s["score_detector_id"] = target_detector
         s["score_alpha"] = alpha_val
         s["round_status"] = "scored"
-        record_observation(s, "score_and_fit", obs, workspace_dir=workspace_dir, branch=branch)
+        record_observation(
+            s, "score_and_fit", obs, workspace_dir=workspace_dir,
+            branch=branch, decision=decision_entry,
+        )
         _save(workspace_dir, s, branch=branch)
         return json.dumps(obs, ensure_ascii=False)

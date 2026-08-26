@@ -109,7 +109,12 @@ class Resolve(Tool):
 
         review = {
             "accepted": [], "rejected": [], "unresolved": [], "call_failed": [],
-            "reviewed": [], "selected": 0, "api_calls": 0,
+            "model_unresolved": [], "below_accept_confidence": [],
+            "technical_failures": [], "reviewed": [], "selected": 0,
+            "api_calls": 0, "successful_responses": 0,
+            "model_unresolved_count": 0, "below_accept_confidence_count": 0,
+            "technical_failure_count": 0, "output_truncated": 0,
+            "invalid_responses": 0, "response_status_counts": {},
         }
         if resolution_policy in ("vlm", "inspect_only") and gray:
             review = run_vlm_review(
@@ -141,13 +146,24 @@ class Resolve(Tool):
             "gray_count": len(gray),
             "detector_discard_count": len(detector_discard_ids),
             "vlm_selected": review["selected"],
+            "vlm_api_calls": review["api_calls"],
+            "vlm_successful_responses": review.get("successful_responses", 0),
             "vlm_accepted": len(accepted_ids),
             "vlm_rejected": len(rejected_ids),
             "vlm_unresolved": len(unresolved_ids),
+            "vlm_model_unresolved": review.get("model_unresolved_count", 0),
+            "vlm_below_accept_confidence": review.get("below_accept_confidence_count", 0),
+            "vlm_technical_failures": review.get("technical_failure_count", 0),
+            "vlm_output_truncated": review.get("output_truncated", 0),
+            "vlm_invalid_responses": review.get("invalid_responses", 0),
             "vlm_call_failed": len(call_failed_ids),
+            "vlm_response_status_counts": review.get("response_status_counts", {}),
+            "vlm_max_tokens": review.get("max_tokens"),
+            "vlm_prompt_version": review.get("prompt_version"),
+            "vlm_review_artifact": review.get("review_artifact"),
             "quarantined": len(quarantined_ids),
         }
-        record_decision(
+        decision_entry = record_decision(
             state,
             "resolve",
             proposed,
@@ -165,7 +181,14 @@ class Resolve(Tool):
                 "clean_count": None,
                 "clean_dataset_id": None,
             }
-            record_observation(state, "resolve", summary, workspace_dir=workspace_dir, branch=branch)
+            record_observation(
+                state,
+                "resolve",
+                summary,
+                workspace_dir=workspace_dir,
+                branch=branch,
+                decision=decision_entry,
+            )
             _save(workspace_dir, state, branch=branch)
             return json.dumps(summary, ensure_ascii=False)
 
@@ -209,15 +232,7 @@ class Resolve(Tool):
         summary = {
             "policy": resolution_policy,
             "decision_source": source,
-            "keep_count": len(keep),
-            "gray_count": len(gray),
-            "detector_discard_count": len(detector_discard_ids),
-            "vlm_selected": review["selected"],
-            "vlm_api_calls": review["api_calls"],
-            "vlm_accepted": len(accepted_ids),
-            "vlm_rejected": len(rejected_ids),
-            "vlm_unresolved": len(unresolved_ids),
-            "vlm_call_failed": len(call_failed_ids),
+            **decision_observation,
             "quarantined_count": len(quarantined_ids),
             "policy_discarded_gray_count": len(gray) if resolution_policy == "auto_keep" else 0,
             "clean_count": len(clean),
@@ -225,6 +240,13 @@ class Resolve(Tool):
             "clean_fingerprint": clean_payload["fingerprint"],
             "quarantine_artifact": quarantine_path.name,
         }
-        record_observation(state, "resolve", summary, workspace_dir=workspace_dir, branch=branch)
+        record_observation(
+            state,
+            "resolve",
+            summary,
+            workspace_dir=workspace_dir,
+            branch=branch,
+            decision=decision_entry,
+        )
         _save(workspace_dir, state, branch=branch)
         return json.dumps(summary, ensure_ascii=False)

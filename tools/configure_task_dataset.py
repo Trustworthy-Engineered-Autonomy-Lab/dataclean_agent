@@ -126,7 +126,10 @@ class ConfigureTaskDataset(Tool):
 
         state = _load(workspace_dir, branch=branch)
         if state.get("task_status", "DRAFT") != "DRAFT":
-            raise ValueError("D_0 can only be configured while the task lifecycle is DRAFT")
+            raise ValueError(
+                "D_0 can only be configured before experimental execution begins; "
+                "create a new task for a different dataset composition"
+            )
         if _is_paired_task(workspace_dir, branch, state):
             raise ValueError(
                 "D_0 is frozen by a paired comparison; configure the first arm before pairing "

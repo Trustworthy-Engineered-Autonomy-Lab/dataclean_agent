@@ -9,6 +9,7 @@ from .utils import (
     _save,
     _write_dataset_snapshot,
     append_ledger,
+    record_observation,
     _task_artifact_reference,
 )
 from .collections import load_collection
@@ -186,7 +187,7 @@ class CommitRound(Tool):
                 }
             },
         }
-        record_decision(
+        decision_entry = record_decision(
             state,
             "transition",
             proposed,
@@ -201,6 +202,14 @@ class CommitRound(Tool):
         )
         state.setdefault("round_history", []).append(completed)
         append_ledger(state, {"stage": "commit_round", **completed})
+        record_observation(
+            state,
+            "commit_round",
+            completed,
+            workspace_dir=workspace_dir,
+            branch=branch,
+            decision=decision_entry,
+        )
 
         state["round"] = next_round
         state["skip_streak"] = next_skip_streak

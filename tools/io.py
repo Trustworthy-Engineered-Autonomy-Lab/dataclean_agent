@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import tempfile
@@ -21,7 +22,7 @@ __all__ = [
     "_task_dir", "_state_path", "_migrate_legacy",
     "_load", "_save", "_artifact", "_load_task_spec", "_write_json_atomic",
     "_task_artifact_reference",
-    "record_observation", "append_ledger",
+    "record_observation", "append_ledger", "backfill_decision_log",
     "_reset_vlm_budget_if_new_round",
     "_session_path", "_load_session", "_save_session",
 ]
@@ -174,34 +175,141 @@ def _load_task_spec(workspace_dir, branch: str = "main"):
     return json.loads(p.read_text())
 
 
-def record_observation(state: dict, stage: str, payload: dict, workspace_dir=None, branch="main"):
+def record_observation(state: dict, stage: str, payload: dict, workspace_dir=None,
+                       branch="main", decision=None):
     state.setdefault("latest_observation", {})[stage] = payload
     if workspace_dir:
-        _auto_write_decision_log(workspace_dir, branch or state.get("branch", "main"), state, stage, payload)
+        _auto_write_decision_log(
+            workspace_dir,
+            branch or state.get("branch", "main"),
+            state,
+            stage,
+            payload,
+            decision=decision,
+        )
 
 
-def _auto_write_decision_log(workspace_dir, branch, state, stage, payload):
-    log_path = _task_dir(workspace_dir, branch) / "decision_log.md"
-    r = state.get("round", 0)
+def _decision_id(entry):
+    existing = entry.get("decision_id")
+    if existing:
+        return str(existing)
+    canonical = json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "legacy_" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def _markdown_json(value):
+    text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+    return "\n".join("    " + line for line in text.splitlines())
+
+
+def _decision_block(branch, entry, outcome=None, recovered=False):
+    decision_id = _decision_id(entry)
+    round_index = entry.get("round", 0)
+    timestamp = entry.get("time", "unknown time")
+    title = entry.get("decision", "unknown")
+    rationale = str(entry.get("rationale") or "No rationale recorded").strip()
+    prefix = "Recovered " if recovered else ""
+    lines = [
+        f"<!-- decision-id:{decision_id} -->",
+        f"### [Round {round_index}] {prefix}Decision={title} · Task={branch} · {timestamp}",
+        f"- **Decision Source**: `{entry.get('source', 'unknown')}`",
+        f"- **Rationale**: {rationale}",
+        "- **Evidence Available at Decision**:",
+        _markdown_json(entry.get("observation") or {}),
+        "- **Proposed Action**:",
+        _markdown_json(entry.get("proposed") or {}),
+        "- **Effective Action**:",
+        _markdown_json(entry.get("effective") or {}),
+    ]
+    if outcome is not None:
+        lines.extend(["- **Observed Outcome**:", _markdown_json(outcome)])
+    lines.extend(["", "---", ""])
+    return "\n".join(lines)
+
+
+def _observation_block(branch, state, stage, payload):
+    round_index = state.get("round", 0)
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    summary_str = json.dumps(payload, ensure_ascii=False)
-    if len(summary_str) > 200:
-        summary_str = summary_str[:200] + "..."
+    return "\n".join([
+        f"### [Round {round_index}] Observation={stage} · Task={branch} · {now}",
+        "- **Observed Outcome**:",
+        _markdown_json(payload),
+        "",
+        "---",
+        "",
+    ])
+
+
+def _decision_log_header(branch):
+    return (
+        f"# Decision Log · Task `{branch}`\n\n"
+        "> Automatically maintained from structured decisions and stage observations. "
+        "It records concise, auditable evidence and rationale—not private chain-of-thought.\n\n"
+        "---\n\n"
+    )
+
+
+def _write_text_atomic(path, text):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _auto_write_decision_log(workspace_dir, branch, state, stage, payload, decision=None):
+    log_path = _task_dir(workspace_dir, branch) / "decision_log.md"
     block = (
-        f"### [Round {r}] Stage={stage} · Task={branch} · {now}\n"
-        f"- **Observation Summary**: `{summary_str}`\n\n"
-        f"---\n\n"
+        _decision_block(branch, decision, outcome=payload)
+        if decision else
+        _observation_block(branch, state, stage, payload)
     )
     if not log_path.exists():
-        header = (
-            f"# Decision Log · Task `{branch}`\n\n"
-            f"> Automatically maintained from stage observations; structured action rationales live in state.json decision_trace.\n\n"
-            f"---\n\n"
-        )
-        log_path.write_text(header + block, encoding="utf-8")
+        _write_text_atomic(log_path, _decision_log_header(branch) + block)
     else:
         with log_path.open("a", encoding="utf-8") as f:
             f.write(block)
+
+
+def backfill_decision_log(workspace_dir, branch, state):
+    """Project legacy state.json decision_trace entries into decision_log.md once.
+
+    Older tasks already contain the Agent's concise rationales in decision_trace,
+    but their Markdown log contains observation summaries only. Stable markers
+    make this migration idempotent without rewriting the historical timeline.
+    """
+    log_path = _task_dir(workspace_dir, branch) / "decision_log.md"
+    current = log_path.read_text(encoding="utf-8") if log_path.exists() else _decision_log_header(branch)
+    current = re.sub(
+        r"> Automatically maintained from stage observations;[^\n]*\n",
+        "> Automatically maintained from structured decisions and observed outcomes. "
+        "It records concise, auditable rationale—not private chain-of-thought.\n",
+        current,
+        count=1,
+    )
+    decisions = state.get("decision_trace") or []
+    if not isinstance(decisions, list):
+        decisions = []
+    decisions = [entry for entry in decisions if isinstance(entry, dict)]
+    present = set(re.findall(r"<!-- decision-id:([^ ]+) -->", current))
+    missing = [entry for entry in decisions if _decision_id(entry) not in present]
+    if missing:
+        section = "\n## Recovered Structured Decisions\n\n"
+        section += "".join(_decision_block(branch, entry, recovered=True) for entry in missing)
+        current += section
+    if missing or (log_path.exists() and current != log_path.read_text(encoding="utf-8")):
+        _write_text_atomic(log_path, current)
+    return current if log_path.exists() or decisions else ""
 
 
 def append_ledger(state: dict, entry: dict):

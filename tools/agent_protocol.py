@@ -232,6 +232,17 @@ def _execution_fingerprint(workspace_dir, branch, state):
     })
 
 
+def current_execution_fingerprint(workspace_dir, branch):
+    """Return the durable execution context used to judge whether a retry is stale.
+
+    This is intentionally based on experiment state and artifacts rather than on
+    conversational wording.  A prerequisite action such as ``partition`` changes
+    the fingerprint, so a previously failed ``resolve`` call becomes eligible to
+    run again without requiring the user to repeat the request.
+    """
+    return _execution_fingerprint(workspace_dir, branch, _load(workspace_dir, branch))
+
+
 def _nonempty_strings(value, field, minimum=1, maximum=None):
     if not isinstance(value, list) or len(value) < minimum:
         raise ValueError(f"{field} must contain at least {minimum} item(s)")

@@ -1,4 +1,5 @@
 import time
+import uuid
 
 
 DECISION_FIELDS = {
@@ -150,6 +151,7 @@ def effective_action(state, decision, proposed):
 
 def record_decision(state, decision, proposed, effective, rationale, source, observation=None):
     entry = {
+        "decision_id": "decision_" + uuid.uuid4().hex[:16],
         "round": int(state.get("round", 0)),
         "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "decision": decision,

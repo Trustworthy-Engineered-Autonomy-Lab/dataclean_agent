@@ -50,7 +50,15 @@ class ListTasks(Tool):
                     summary["deployments"] = s.get("deployments")
                     summary["clean_count"] = s.get("clean_count")
                     summary["round_status"] = s.get("round_status")
-                    summary["task_status"] = s.get("task_status", "DRAFT")
+                    internal_status = s.get("task_status", "DRAFT")
+                    summary["dataset_configuration"] = (
+                        "editable" if internal_status == "DRAFT" else "frozen"
+                    )
+                    summary["execution_status"] = (
+                        "completed"
+                        if internal_status == "COMPLETED"
+                        else ("not_started" if internal_status == "DRAFT" else "started")
+                    )
                     summary["round_input_count"] = s.get("round_input_count")
                 except Exception:
                     pass

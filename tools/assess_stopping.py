@@ -55,14 +55,21 @@ class AssessStopping(Tool):
             "round_status": state.get("round_status"),
             "deployments": int(state.get("deployments", 0)),
         }
-        record_decision(
+        decision_entry = record_decision(
             state, "stopping", proposed, effective, rationale, source,
             observation=observation,
         )
         summary = {
             "stop": stop, "decision_source": source,
-            "task_status": state.get("task_status"), **observation,
+            "execution_status": "completed" if stop else "active", **observation,
         }
-        record_observation(state, "assess_stopping", summary, workspace_dir=workspace_dir, branch=branch)
+        record_observation(
+            state,
+            "assess_stopping",
+            summary,
+            workspace_dir=workspace_dir,
+            branch=branch,
+            decision=decision_entry,
+        )
         _save(workspace_dir, state, branch=branch)
         return json.dumps(summary, ensure_ascii=False)

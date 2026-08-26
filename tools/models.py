@@ -1,11 +1,15 @@
 import torch
 import torch.nn as nn
 from torchvision import transforms
+from .image_contract import IMAGE_HEIGHT, IMAGE_WIDTH
 
-TRANSFORM_144_224 = transforms.Compose([
-    transforms.Resize((144, 224)),
+TRANSFORM_224_224 = transforms.Compose([
+    transforms.Resize((IMAGE_HEIGHT, IMAGE_WIDTH)),
     transforms.ToTensor(),
 ])
+
+_ENCODED_HEIGHT = (IMAGE_HEIGHT + 15) // 16
+_ENCODED_WIDTH = (IMAGE_WIDTH + 15) // 16
 
 class ImageEncoder(nn.Sequential):
     def __init__(self):
@@ -15,14 +19,14 @@ class ImageEncoder(nn.Sequential):
             nn.Conv2d(32, 64, 3, stride=2, padding=1), nn.BatchNorm2d(64), nn.ReLU(True),
             nn.Conv2d(64, 128, 3, stride=2, padding=1), nn.BatchNorm2d(128), nn.ReLU(True),
             nn.Flatten(),
-            nn.Linear(128 * 9 * 14, 256), nn.ReLU(True)
+            nn.Linear(128 * _ENCODED_HEIGHT * _ENCODED_WIDTH, 256), nn.ReLU(True)
         )
 
 class ImageDecoder(nn.Sequential):
     def __init__(self, input_dim=256):
         super().__init__(
-            nn.Linear(input_dim, 128 * 9 * 14), nn.ReLU(True),
-            nn.Unflatten(1, (128, 9, 14)),
+            nn.Linear(input_dim, 128 * _ENCODED_HEIGHT * _ENCODED_WIDTH), nn.ReLU(True),
+            nn.Unflatten(1, (128, _ENCODED_HEIGHT, _ENCODED_WIDTH)),
             nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1), nn.BatchNorm2d(64), nn.ReLU(True),
             nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1), nn.BatchNorm2d(32), nn.ReLU(True),
             nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1), nn.BatchNorm2d(16), nn.ReLU(True),
@@ -47,6 +51,11 @@ class UnifiedCAE(nn.Module):
         )
 
     def forward(self, x):
+        if x.dim() != 4 or tuple(x.shape[1:]) != (3, IMAGE_HEIGHT, IMAGE_WIDTH):
+            raise ValueError(
+                f"UnifiedCAE expects NCHW RGB tensors shaped "
+                f"[N,3,{IMAGE_HEIGHT},{IMAGE_WIDTH}]"
+            )
         latent = self.encoder(x)
         x_recon = self.decoder(latent)
         steer_pred = self.steer_head(latent)
@@ -55,7 +64,7 @@ class UnifiedCAE(nn.Module):
 class ControllerCNN(nn.Module):
     """
     NVIDIA-style CNN architecture for End-to-End Steering Angle Prediction.
-    Input: (N, 3, 144, 224)
+    Input: (N, 3, 224, 224)
     Output: (N, 1) steering prediction
     """
     def __init__(self):
@@ -72,7 +81,9 @@ class ControllerCNN(nn.Module):
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
             nn.ReLU(inplace=True),
         )
-        self.flatten_dim = 64 * 11 * 21
+        with torch.no_grad():
+            probe = torch.zeros(1, 3, IMAGE_HEIGHT, IMAGE_WIDTH)
+            self.flatten_dim = int(self.features(probe).reshape(1, -1).size(1))
         self.classifier = nn.Sequential(
             nn.Linear(self.flatten_dim, 100),
             nn.ReLU(inplace=True),
@@ -86,6 +97,10 @@ class ControllerCNN(nn.Module):
     def forward(self, x):
         if x.dim() != 4 or x.size(1) != 3:
             raise ValueError("ControllerCNN expects NCHW RGB tensors")
+        if tuple(x.shape[-2:]) != (IMAGE_HEIGHT, IMAGE_WIDTH):
+            raise ValueError(
+                f"ControllerCNN expects spatial size {IMAGE_HEIGHT}x{IMAGE_WIDTH}"
+            )
         x = x.float()
         x = x * 2.0 - 1.0
 

@@ -10,6 +10,9 @@ from torch.utils.data import DataLoader
 from .base import Tool
 from .decision_policy import effective_action, record_decision
 from .models import UnifiedCAE
+from .image_contract import (
+    IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH, INPUT_CONTRACT_VERSION,
+)
 from .utils import _load, _save, _artifact, _records, DrivingDataset, _ensure_constraints, print_progress, record_observation
 
 class TrainDetector(Tool):
@@ -159,6 +162,17 @@ class TrainDetector(Tool):
         model = UnifiedCAE().to(device)
 
         if strategy == "reuse":
+            detector_meta = s.get("detector") or {}
+            expected_shape = [IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH]
+            if (
+                detector_meta.get("id") != detector_id
+                or detector_meta.get("input_shape") != expected_shape
+                or detector_meta.get("input_contract_version") != INPUT_CONTRACT_VERSION
+            ):
+                raise ValueError(
+                    "The requested detector does not declare the current 224x224 input "
+                    "contract. Retrain the detector before reuse."
+                )
             ckpt_path = _artifact(workspace_dir, f"{detector_id}.pt", branch=branch)
             if not ckpt_path.exists():
                 raise FileNotFoundError(f"Cannot reuse missing detector checkpoint: {ckpt_path}")
@@ -278,10 +292,12 @@ class TrainDetector(Tool):
             "configured_epochs": actual_epochs,
             "lambda": actual_lambda, "steer_lambda": actual_steer_lambda, "batch_size": batch_size,
             "seed": seed,
+            "input_shape": [IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH],
+            "input_contract_version": INPUT_CONTRACT_VERSION,
             "loss": loss_summary
         }
         s["round_status"] = "detector_ready"
-        record_decision(
+        decision_entry = record_decision(
             s,
             "detector",
             proposed,
@@ -301,6 +317,9 @@ class TrainDetector(Tool):
             "detector_epochs_used_total": s.get("detector_train_epochs_used", 0),
             "training_samples": len(recs), "loss_summary": loss_summary
         }
-        record_observation(s, "train_detector", result, workspace_dir=workspace_dir, branch=branch)
+        record_observation(
+            s, "train_detector", result, workspace_dir=workspace_dir,
+            branch=branch, decision=decision_entry,
+        )
         _save(workspace_dir, s, branch=branch)
         return json.dumps(result, ensure_ascii=False)

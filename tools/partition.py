@@ -136,7 +136,7 @@ class Partition(Tool):
             "scores_artifact": s.get("latest_scores"),
         }
         s["round_status"] = "partitioned"
-        record_decision(
+        decision_entry = record_decision(
             s,
             "partition",
             proposed,
@@ -158,7 +158,14 @@ class Partition(Tool):
             "candidates": candidates,
             "score_stats": stats,
         }
-        record_observation(s, "partition", summary, workspace_dir=workspace_dir, branch=branch)
+        record_observation(
+            s,
+            "partition",
+            summary,
+            workspace_dir=workspace_dir,
+            branch=branch,
+            decision=decision_entry,
+        )
         append_ledger(s, {
             "stage": "partition",
             "round": s.get("round"),

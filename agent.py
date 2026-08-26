@@ -13,11 +13,12 @@ from tools.utils import set_progress_queue
 from tools.agent_protocol import (
     action_requires_episode,
     authorize_action_call,
+    current_execution_fingerprint,
     finish_action_call,
     record_turn_completed,
 )
 
-AGENT_PROMPT_VERSION = "conversation-driven-runtime-v5"
+AGENT_PROMPT_VERSION = "conversation-driven-runtime-v6"
 _NON_OPERATIONAL_ARGUMENTS = {"rationale", "request_basis"}
 _PROTOCOL_MUTATION_TOOLS = {
     "propose_experiment_episode", "assess_experiment_episode",
@@ -98,6 +99,16 @@ def _classify_tool_result(result):
     return (not failed), (explicit or ("failed" if failed else "succeeded")), error
 
 
+def _tool_result_retryable(result):
+    """Read the retry hint from the normalized runtime envelope."""
+    text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return False
+    return bool(payload.get("retryable", False)) if isinstance(payload, dict) else False
+
+
 def _tool_result_event(name, result):
     ok, status, error = _classify_tool_result(result)
     return {"type": "tool_result", "name": name, "result": result,
@@ -168,7 +179,56 @@ class Turn:
         }
         self.model_steps = 0
         self.tool_calls_used = 0
-        self.failed_operational_calls = set()
+        # A failure is meaningful only in the execution context in which it
+        # occurred. Values keep bounded retry metadata for genuinely transient
+        # errors; changed experiment state invalidates the record lazily.
+        self.failed_operational_calls = {}
+
+    def _execution_fingerprint(self):
+        workspace_dir = self.context.get("workspace_dir")
+        branch = self.context.get("branch")
+        if not workspace_dir or not branch:
+            return None
+        try:
+            return current_execution_fingerprint(workspace_dir, branch)
+        except Exception:
+            # If state cannot be observed, do not claim that runtime conditions
+            # are unchanged and accidentally suppress a valid action.
+            return None
+
+    def _remember_failed_call(self, signature, result):
+        fingerprint = self._execution_fingerprint()
+        if fingerprint is None:
+            return
+        previous = self.failed_operational_calls.get(signature)
+        # Keep a true bound even when a failed external attempt leaves behind a
+        # partial artifact and therefore changes its own fingerprint. A separate
+        # successful prerequisite is handled by _failed_retry_block, which sees
+        # that the context changed before the next attempt and drops this record.
+        attempts = int(previous.get("attempts", 0)) + 1 if previous else 1
+        self.failed_operational_calls[signature] = {
+            "execution_fingerprint": fingerprint,
+            "attempts": attempts,
+            "retryable": _tool_result_retryable(result),
+            "error": _classify_tool_result(result)[2],
+        }
+
+    def _failed_retry_block(self, signature):
+        """Return a stale failure only when relevant execution state is unchanged."""
+        previous = self.failed_operational_calls.get(signature)
+        if not previous:
+            return None
+        fingerprint = self._execution_fingerprint()
+        if fingerprint is None:
+            return None
+        if previous.get("execution_fingerprint") != fingerprint:
+            self.failed_operational_calls.pop(signature, None)
+            return None
+        # Permit one automatic retry for a tool that explicitly classified its
+        # failure as transient. Persistent failures are then replanned normally.
+        if previous.get("retryable") and int(previous.get("attempts", 0)) < 2:
+            return None
+        return previous
     def interrupt(self): self.stop.set()
     def __iter__(self):
         try:
@@ -340,31 +400,31 @@ class Turn:
                     # emitted in the same response cannot be a valid replan.
                     state_changing_call_seen = True
                 operational_signature = _operational_call_signature(call["name"], args)
-                if operational_signature in self.failed_operational_calls:
+                failed_retry = self._failed_retry_block(operational_signature)
+                if failed_retry is not None:
                     result = _tool_result_envelope(call["name"], json.dumps({
                         "error": (
-                            "Duplicate retry blocked: this operation already failed under the "
-                            "same operational arguments. Rephrasing rationale/request_basis does "
-                            "not change runtime conditions."
+                            "This exact operation already failed and the relevant execution "
+                            "state has not changed. Replan from the previous error or perform "
+                            "the missing prerequisite before retrying."
                         ),
-                        "code": "duplicate_failed_call",
+                        "code": "unchanged_failed_retry",
                         "retryable": False,
+                        "previous_error": failed_retry.get("error"),
                     }, ensure_ascii=False))
                     yield _tool_result_event(call["name"], result)
                     self.messages.append({"role":"tool","content":result,"tool_call_id":call["id"]})
-                    message = (
-                        "同一操作已在相同条件下失败，系统已阻止仅改写理由后的重复调用。"
-                        "需要根据错误改变实际条件，或向用户说明阻塞原因。"
-                    )
-                    self.messages.append({"role": "assistant", "content": message})
-                    yield {"type": "content", "text": message}
-                    return
+                    # This is an observation for the Agent, not a canned answer to
+                    # the user. Continue the loop so it can inspect state, satisfy
+                    # a prerequisite, choose another action, or explain a genuine
+                    # external blocker in the context of the user's request.
+                    continue
                 try:
                     tool=self.tools.get(call["name"])
                 except KeyError as e:
                     result=json.dumps({"error":str(e)}, ensure_ascii=False)
                     result = _tool_result_envelope(call["name"], result)
-                    self.failed_operational_calls.add(operational_signature)
+                    self._remember_failed_call(operational_signature, result)
                     yield _tool_result_event(call["name"], result)
                     self.messages.append({"role":"tool","content":result,"tool_call_id":call["id"]})
                     continue
@@ -381,7 +441,7 @@ class Turn:
                 except Exception as exc:
                     result = json.dumps({"error": str(exc), "protocol_rejected": True}, ensure_ascii=False)
                     result = _tool_result_envelope(call["name"], result)
-                    self.failed_operational_calls.add(operational_signature)
+                    self._remember_failed_call(operational_signature, result)
                     yield _tool_result_event(call["name"], result)
                     self.messages.append({"role":"tool","content":result,"tool_call_id":call["id"]})
                     continue
@@ -444,8 +504,6 @@ class Turn:
                 th.join()
                 result = _box["result"] if _box["exc"] is None else json.dumps({"error":str(_box["exc"])})
                 result = _tool_result_envelope(call["name"], result)
-                if not _classify_tool_result(result)[0]:
-                    self.failed_operational_calls.add(operational_signature)
                 try:
                     finish_action_call(
                         self.context.get("workspace_dir"), self.context.get("branch"),
@@ -459,6 +517,10 @@ class Turn:
                         "requires_reconciliation": True,
                     }, ensure_ascii=False)
                 result = _tool_result_envelope(call["name"], result)
+                if not _classify_tool_result(result)[0]:
+                    # Record after protocol persistence: the retry comparison must
+                    # use the complete post-attempt execution context.
+                    self._remember_failed_call(operational_signature, result)
                 yield _tool_result_event(call["name"], result)
                 self.messages.append({"role":"tool","content":result,"tool_call_id":call["id"]})
 

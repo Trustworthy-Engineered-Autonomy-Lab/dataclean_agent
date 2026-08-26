@@ -10,9 +10,11 @@ from fastapi.staticfiles import StaticFiles
 import database
 from agent import Agent
 from tools import Tool, optional_dependency_errors
-from tools.utils import ROOT, TASKS_DIR, _load, _load_session, _dataset_config, _task_dir, _write_json_atomic
-from tools.policies import (describe_task_types, describe_default_pipeline,
-                            LEDGER_FIELDS, policies_payload)
+from tools.utils import (
+    ROOT, TASKS_DIR, _load, _dataset_config, _task_dir, _write_json_atomic,
+    backfill_decision_log,
+)
+from tools.policies import LEDGER_FIELDS, policies_payload
 from doctor import _module_status
 
 HOST = os.environ.get("DATACLEAN_HOST", "127.0.0.1")
@@ -217,7 +219,7 @@ Research contract:
 - Never infer downstream work merely because it is the conventional next pipeline stage. Conversely, when the user has clearly requested an end-to-end outcome, do not stop after each tool and ask for ritual approval. The action sequence must be driven by the conversational goal and current evidence, not by a hard-coded checklist.
 - The agent is unsupervised. Never infer or request hidden evaluation labels, AUC, precision, recall, F1, purity, or other held-out results when making decisions.
 - Distinguish user-directed task data composition from data cleaning. If the user explicitly requests per-source counts or caps (for example, one named source at 8000 and every other source at 500), call configure_task_dataset before any experiment episode or training. A source name explicitly supplied by the user may be used only to configure that requested view; never treat its semantic name as evaluation evidence. Do not reinterpret the request as a desired clean output and do not start detector training. If execution has already begun, explain that a new task is required.
-- Task lifecycle is DRAFT → LOCKED → RUNNING → COMPLETED. Dataset design changes are allowed only in DRAFT. A stop=true decision is terminal and makes the task read-only; further experimentation requires a new task.
+- Dataset editability is an internal runtime capability, not a user approval gate. Before the first experimental action, D_0 remains editable. An explicit user request to train, score, partition, resolve, deploy, or perform another consequential action automatically freezes D_0 as part of that tool call. Call the requested tool directly: never ask the user to "lock" a task, never claim that a separate lock command or UI action is required, and never expose internal DRAFT/LOCKED/RUNNING transaction states as user workflow. After execution begins, a different D_0 requires a new task. A stop=true decision is terminal and makes the task read-only.
 - In round t, D_t is the immutable round input. The canonical dependency path can produce C_t through detector, scoring, partition, and resolution, while controller training/deployment are optional. This is an available experiment graph, not a checklist: do not call a stage merely to complete the pipeline. Observation-only diagnosis, sensitivity analysis, bounded ablations, early stopping, and replanning are valid whenever the task specification and tool dependencies permit them.
 - A round advances only through commit_round. clean_only commits D_(t+1)=C_t; deploy_collect_merge commits D_(t+1)=C_t union N_t after collected data is transferred.
 - eval_controller returns a unique deployment_run_id. Transfer only that exact run with transfer_eval_results; never guess a "latest" file. The resulting N_t is a task-local CollectionArtifact and never becomes part of the workspace BaseDataset. Pass CollectionArtifact IDs to commit_round, not dataset source names.
@@ -231,6 +233,7 @@ Research contract:
 - Treat task pipeline, experimental variable, hard resource/safety constraints, and dataset fingerprints in <context> as authoritative. Do not change an experimental variable unless the user explicitly changes the task design.
 - Physical deployment/evaluation is controlled through the conversation, as in the original lab implementation. When the user asks to deploy or retry deployment, call the physical tool; do not refuse based on allow_physical_deploy or historical assistant claims about that obsolete gate. A retry in a new user message is a new instruction and may repeat identical tool arguments. A tool failure or unresolved VLM result is not evidence that a sample is anomalous.
 - Treat a structured tool result with status=failed/error/cancelled/rejected as a failed action. Inspect and replan; never describe it as completed.
+- When reporting VLM review, distinguish valid model verdicts from technical outcomes. Report successful_responses, model_unresolved, below-confidence normal verdicts, output_truncated/invalid responses, and endpoint/input failures separately; never summarize technical failures as model uncertainty.
 - Within one user turn, never retry a failed operation by changing only rationale/request_basis. In a later turn, an explicit user retry instruction is new authority: call the tool again even with identical operational arguments instead of refusing from conversation history.
 - Every Agent tool result uses {ok,status,code,data,error,retryable,state_changed,artifact_refs}. Read domain output from data; use top-level ok/status as the only execution-success signal.
 
@@ -451,7 +454,9 @@ def task_detail(task_id: str):
         spec = json.loads((td / "task_spec.json").read_text())
     if (td / "state.json").exists():
         state = json.loads((td / "state.json").read_text())
-    if (td / "decision_log.md").exists():
+    if state is not None:
+        log = backfill_decision_log(p, task_id, state)
+    elif (td / "decision_log.md").exists():
         log = (td / "decision_log.md").read_text()
     session = {}
     sp = td / "session.json"
