@@ -3,6 +3,7 @@ from pathlib import Path
 
 from .base import Tool
 from .decision_policy import effective_action, record_decision
+from .detector_contract import normality_scores, require_partition_contract, score_contract
 from .policies import POLICIES
 from .utils import (
     _artifact,
@@ -25,13 +26,17 @@ class Resolve(Tool):
     description = (
         "Resolve the current partition into immutable C_t. auto_keep keeps only the detector keep region; "
         "vlm adds gray samples explicitly accepted by the reviewer; inspect_only audits gray without producing C_t. "
-        "Unreviewed or failed VLM samples are quarantined, never mislabeled as VLM rejects."
+        "Unreviewed or failed VLM samples are quarantined, never mislabeled as VLM rejects. "
+        "For vlm/inspect_only, provide budget, sampling_strategy and accept_confidence; auto_keep needs none of these."
     )
     parameters = {
         "type": "object",
         "properties": {
             "resolution_policy": {"type": "string", "enum": list(_RESOLUTION_POLICIES)},
-            "budget": {"type": "integer", "minimum": 1},
+            "budget": {
+                "type": "integer", "minimum": 1,
+                "description": "Explicit VLM call budget; required for vlm/inspect_only.",
+            },
             "sampling_strategy": {
                 "type": "string",
                 "enum": ["pollution_defense", "rare_behavior_recovery", "information_gain", "verification"],
@@ -49,10 +54,10 @@ class Resolve(Tool):
 
     def run(
         self,
-        resolution_policy="vlm",
-        budget=200,
-        sampling_strategy="pollution_defense",
-        accept_confidence="high",
+        resolution_policy=None,
+        budget=None,
+        sampling_strategy=None,
+        accept_confidence=None,
         rationale="",
         branch="main",
         workspace_dir=None,
@@ -65,6 +70,7 @@ class Resolve(Tool):
         partition = state.get("latest_partition")
         if not partition:
             raise ValueError("Run partition before resolve")
+        require_partition_contract(partition)
         if state.get("round_status") != "partitioned":
             raise ValueError("Resolve requires an applied current-round partition")
         if state.get("active_clean_dataset"):
@@ -72,25 +78,43 @@ class Resolve(Tool):
 
         proposed = {
             "resolution_policy": resolution_policy,
-            "budget": int(budget),
+            "budget": None if budget is None else int(budget),
             "sampling_strategy": sampling_strategy,
             "accept_confidence": accept_confidence,
         }
         effective, source = effective_action(state, "resolve", proposed)
-        resolution_policy = effective.get("resolution_policy", resolution_policy)
-        budget = int(effective.get("budget", budget))
-        sampling_strategy = effective.get("sampling_strategy", sampling_strategy)
-        accept_confidence = effective.get("accept_confidence", accept_confidence)
-        if budget < 1:
-            raise ValueError("budget must be >= 1")
-        if sampling_strategy not in (
-            "pollution_defense", "rare_behavior_recovery", "information_gain", "verification"
-        ):
-            raise ValueError("Unknown sampling_strategy")
-        if accept_confidence not in ("low", "medium", "high"):
-            raise ValueError("Unknown accept_confidence")
+        resolution_policy = effective.get("resolution_policy")
         if resolution_policy not in _RESOLUTION_POLICIES:
             raise ValueError(f"Unknown resolution_policy: {resolution_policy}")
+        if resolution_policy in ("vlm", "inspect_only"):
+            review_fields = ("budget", "sampling_strategy", "accept_confidence")
+            missing = [name for name in review_fields if effective.get(name) is None]
+            if missing:
+                raise ValueError(
+                    "VLM resolution requires explicit decisions for: "
+                    + ", ".join(missing)
+                )
+            budget = int(effective["budget"])
+            sampling_strategy = effective["sampling_strategy"]
+            accept_confidence = effective["accept_confidence"]
+            if budget < 1:
+                raise ValueError("budget must be >= 1")
+            if sampling_strategy not in (
+                "pollution_defense", "rare_behavior_recovery", "information_gain", "verification"
+            ):
+                raise ValueError("Unknown sampling_strategy")
+            if accept_confidence not in ("low", "medium", "high"):
+                raise ValueError("Unknown accept_confidence")
+        else:
+            budget = None
+            sampling_strategy = None
+            accept_confidence = None
+        effective = {
+            **effective,
+            "budget": budget,
+            "sampling_strategy": sampling_strategy,
+            "accept_confidence": accept_confidence,
+        }
         if source.startswith("agent") and not rationale.strip():
             raise ValueError("Adaptive resolve decisions require an observation-based rationale")
         if source == "fixed_policy" and not rationale.strip():
@@ -100,6 +124,7 @@ class Resolve(Tool):
         scored = json.loads(
             _task_artifact_reference(workspace_dir, branch, scores_ref).read_text()
         )
+        normality_scores(scored)
         score_map = {r["id"]: r for r in scored}
         keep = [score_map[i] for i in partition.get("keep_ids", []) if i in score_map]
         gray = [score_map[i] for i in partition.get("gray_ids", []) if i in score_map]
@@ -142,6 +167,7 @@ class Resolve(Tool):
         quarantined_ids = sorted(unresolved_ids | call_failed_ids | unreviewed_ids)
 
         decision_observation = {
+            "score_contract": score_contract(),
             "keep_count": len(keep),
             "gray_count": len(gray),
             "detector_discard_count": len(detector_discard_ids),
@@ -159,6 +185,7 @@ class Resolve(Tool):
             "vlm_call_failed": len(call_failed_ids),
             "vlm_response_status_counts": review.get("response_status_counts", {}),
             "vlm_max_tokens": review.get("max_tokens"),
+            "vlm_thinking_mode": review.get("thinking_mode"),
             "vlm_prompt_version": review.get("prompt_version"),
             "vlm_review_artifact": review.get("review_artifact"),
             "quarantined": len(quarantined_ids),
@@ -207,7 +234,10 @@ class Resolve(Tool):
             metadata={
                 "resolution_policy": resolution_policy,
                 "partition_threshold": partition.get("threshold"),
-                "gray_upper_threshold": partition.get("gray_upper_threshold"),
+                "gray_lower_threshold": partition.get("gray_lower_threshold"),
+                "score_contract": score_contract(),
+                "scores_artifact": Path(scores_ref).name,
+                "round_input_fingerprint": state.get("round_input_fingerprint"),
                 "decision_source": source,
                 "rationale": rationale,
             },

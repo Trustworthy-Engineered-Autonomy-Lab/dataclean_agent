@@ -27,7 +27,7 @@ __all__ = [
     "_read_sources_records",
     "_dataset_registry_path", "_load_dataset_registry", "_save_dataset_registry",
     "_dataset_config", "_anonymize_source_name", "_deanonymize_source_name",
-    "_quantiles", "_combined_score", "_threshold",
+    "_quantiles",
 ]
 
 
@@ -46,14 +46,19 @@ _ANON_PREDEFINED = {
 }
 
 def _anonymize_source_name(real_name: str) -> str:
+    """One stable, idempotent alias used in records, observations and reports.
+
+    Collection IDs are immutable UUID-backed identities, so their digest stays
+    the same across retries/rounds without allocating report-local numbers.
+    """
     if not real_name:
         return real_name
     if real_name in _ANON_PREDEFINED:
         return _ANON_PREDEFINED[real_name]
-    if real_name.startswith("collect_"):
-        return real_name.replace("collect_", "car_log_")
-    if re.fullmatch(r"src_[0-9a-f]{8}", real_name) or real_name.startswith("car_log_"):
+    if re.fullmatch(r"src_(?:[0-9]+|[0-9a-f]{8})", real_name):
         return real_name
+    if real_name.startswith("car_log_"):
+        real_name = "collect_" + real_name[len("car_log_"):]
     # Hash arbitrary semantic source names so labels such as "failure_case"
     # cannot leak into the unsupervised agent context.
     digest = hashlib.sha256(real_name.encode("utf-8")).hexdigest()[:8]
@@ -451,23 +456,3 @@ def _quantiles(values):
         "mean": round(float(a.mean()), 5),
         "std": round(float(a.std()), 5)
     }
-
-
-def _combined_score(pcc, steer_err, alpha: float = 0.5, eps: float = 1e-9):
-    p = np.asarray(pcc, dtype=float)
-    e = np.asarray(steer_err, dtype=float)
-
-    def _n(x):
-        # Robust within-round scaling avoids allowing one extreme sample to
-        # compress the score of every other sample. Raw components remain in
-        # artifacts for cross-round analysis; composite scores are not treated
-        # as calibrated probabilities.
-        lo, hi = np.quantile(x, [0.05, 0.95]) if len(x) >= 20 else (x.min(), x.max())
-        return np.clip((x - lo) / (hi - lo + eps), 0.0, 1.0)
-
-    return alpha * _n(1.0 - p) + (1.0 - alpha) * _n(e)
-
-
-def _threshold(scores, k: float = 1.0, eps: float = 1e-9):
-    a = np.asarray(scores, dtype=float)
-    return float(a.mean()) + float(k) * float(a.std())

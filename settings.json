@@ -4,9 +4,8 @@
   "api_key": "",
   "temperature": 0.0,
   "seed": null,
-  "vlm_model": "Qwen/Qwen3.5-35B-A3B",
+  "vlm_model": "Qwen/Qwen3.8-27B",
   "vlm_base_url": "http://localhost:8000/v1",
   "vlm_api_key": "",
   "vlm_max_tokens": 2048
 }
-

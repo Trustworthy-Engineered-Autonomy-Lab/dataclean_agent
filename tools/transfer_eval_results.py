@@ -91,6 +91,10 @@ def _cte_metrics(path):
 def _apply_transfer_state(state, run, artifact, metrics):
     """Idempotently link an already committed collection into task state."""
     collection_id = artifact["collection_id"]
+    alias = artifact["anonymous_source"]
+    if run.get("anonymous_source", alias) != alias:
+        raise ValueError("DeploymentRun and collection disagree on anonymous source identity")
+    run["anonymous_source"] = alias
     run["status"] = "transferred"
     run["collection_fingerprint"] = artifact["fingerprint"]
     run["collection_count"] = artifact["count"]
@@ -152,6 +156,7 @@ class TransferEvalResults(Tool):
                 "status": "success", "idempotent": True,
                 "deployment_run_id": deployment_run_id,
                 "collection_id": collection_id, "collection_count": artifact["count"],
+                "anonymous_source": artifact["anonymous_source"],
                 "collection_fingerprint": artifact["fingerprint"],
                 "evaluation_visibility": visibility, **visible_metrics,
             }
@@ -218,6 +223,7 @@ class TransferEvalResults(Tool):
         result = {
             "status": "success", "deployment_run_id": deployment_run_id,
             "collection_id": collection_id, "collection_count": artifact["count"],
+            "anonymous_source": artifact["anonymous_source"],
             "collection_fingerprint": artifact["fingerprint"],
             "evaluation_visibility": visibility, **visible_metrics,
             "message": "Task-local CollectionArtifact created; BaseDataset was not modified.",

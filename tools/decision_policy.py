@@ -26,7 +26,7 @@ def validate_fixed_policy(policy):
         return errors
 
     detector = policy["detector"]
-    for field in ("strategy", "learning_rate", "epochs", "lambda_value", "steer_lambda", "n_reference_latents", "seed"):
+    for field in ("strategy", "learning_rate", "epochs", "lambda_value", "seed"):
         if field not in detector:
             errors.append(f"detector.{field} is required")
     if detector.get("strategy") not in ("retrain", "reuse", "retrain_first_then_reuse"):
@@ -36,22 +36,21 @@ def validate_fixed_policy(policy):
     try:
         if not 5e-6 <= float(detector["learning_rate"]) <= 5e-4:
             errors.append("detector.learning_rate is outside [5e-6, 5e-4]")
-        if not 10 <= int(detector["epochs"]) <= 120:
-            errors.append("detector.epochs is outside [10, 120]")
-        if int(detector["n_reference_latents"]) < 10:
-            errors.append("detector.n_reference_latents must be >= 10")
+        if not 1 <= int(detector["epochs"]) <= 120:
+            errors.append("detector.epochs is outside [1, 120]")
+        if detector.get("n_reference_latents") is not None and int(detector["n_reference_latents"]) < 1:
+            errors.append("detector.n_reference_latents must be >= 1")
+        if not 1 <= int(detector.get("batch_size", 256)) <= 512:
+            errors.append("detector.batch_size must be in [1, 512]")
     except (KeyError, TypeError, ValueError):
         pass
     allowed_lambdas = {0.1, 0.5, 1.0, 2.0, 5.0, 10.0}
     if detector.get("lambda_value") not in allowed_lambdas:
         errors.append("detector.lambda_value is invalid")
-    if detector.get("steer_lambda") not in allowed_lambdas:
-        errors.append("detector.steer_lambda is invalid")
-    try:
-        if not 0 <= float(policy["score"].get("alpha")) <= 1:
-            errors.append("score.alpha must be in [0, 1]")
-    except (TypeError, ValueError):
-        errors.append("score.alpha must be numeric")
+    if "steer_lambda" in detector:
+        errors.append("detector.steer_lambda was removed with the old steering-prediction head")
+    if policy["score"].get("method") != "pcc" or "alpha" in policy["score"]:
+        errors.append("score must preregister method=pcc without alpha (higher = normal)")
     partition = policy["partition"]
     if partition.get("rule") not in ("fixed", "mean_std", "otsu", "kde_valley"):
         errors.append("partition.rule must be fixed, mean_std, otsu, or kde_valley")
@@ -60,14 +59,16 @@ def validate_fixed_policy(policy):
             float(partition["value"])
         except (KeyError, TypeError, ValueError):
             errors.append("partition.value must be numeric when rule=fixed")
-    upper_rule = partition.get("gray_upper_rule", "none")
-    if upper_rule not in ("none", "fixed", "mean_plus_2std", "quantile"):
-        errors.append("partition.gray_upper_rule is invalid")
-    if upper_rule == "fixed":
+    if any(key.startswith("gray_upper") for key in partition):
+        errors.append("partition.gray_upper_* belongs to the removed anomaly-score convention")
+    lower_rule = partition.get("gray_lower_rule", "none")
+    if lower_rule not in ("none", "fixed", "mean_minus_2std", "quantile"):
+        errors.append("partition.gray_lower_rule is invalid")
+    if lower_rule == "fixed":
         try:
-            float(partition["gray_upper_value"])
+            float(partition["gray_lower_value"])
         except (KeyError, TypeError, ValueError):
-            errors.append("partition.gray_upper_value must be numeric")
+            errors.append("partition.gray_lower_value must be numeric")
     if policy["resolve"].get("resolution_policy") not in ("vlm", "auto_keep"):
         errors.append("resolve.resolution_policy is invalid")
     for field in ("resolution_policy", "budget", "sampling_strategy", "accept_confidence"):

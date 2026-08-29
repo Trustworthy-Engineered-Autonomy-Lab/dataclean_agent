@@ -3,13 +3,14 @@ import os
 import time
 import uuid
 import math
-from pathlib import Path
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from .base import Tool
 from .decision_policy import effective_action, record_decision
-from .models import UnifiedCAE
+from .models import IROS2026CAE
+from .detector_contract import DETECTOR_ARCHITECTURE, score_contract
 from .image_contract import (
     IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH, INPUT_CONTRACT_VERSION,
 )
@@ -17,7 +18,13 @@ from .utils import _load, _save, _artifact, _records, DrivingDataset, _ensure_co
 
 class TrainDetector(Tool):
     name = "train_detector"
-    description = "Train or reuse the UnifiedCAE detector for the immutable current-round input D_t."
+    description = (
+        "Train or reuse the IROS2026 image+steering CAE on current D_t. "
+        "Loss is reconstruction MSE + lambda * nearest frozen-reference latent MSE, "
+        "active from epoch 1. No steering-prediction head or warm-up. "
+        "Reference default: max(1, floor(N/50)); batch default: 256, as in the supplied code. "
+        "For retraining, provide learning_rate, epochs, lambda_value and seed; reuse does not require them."
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -30,24 +37,21 @@ class TrainDetector(Tool):
             },
             "epochs": {
                 "type": "integer",
-                "minimum": 10,
+                "minimum": 1,
                 "maximum": 120,
-                "description": "Number of training epochs (range: 10 to 120)."
+                "description": "Number of training epochs (range: 1 to 120)."
             },
             "lambda_value": {
                 "type": "number",
                 "enum": [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
             },
-            "steer_lambda": {
-                "type": "number",
-                "enum": [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
-            },
+            "batch_size": {"type": "integer", "minimum": 1, "maximum": 512,
+                           "description": "Default 256 (IROS2026); lower explicitly if GPU memory is limited."},
             "strategy": {"type": "string", "enum": ["retrain", "reuse", "retrain_first_then_reuse"]},
             "n_reference_latents": {
                 "type": "integer",
-                "minimum": 10,
-                "maximum": 5000,
-                "description": "Number of reference latent features for the latent-reference loss term (range: 10 to 5000). More = denser reference manifold, slower build. Default 500."
+                "minimum": 1,
+                "description": "Optional reference count override. Omit for the IROS2026 floor(N/50) rule (at least 1)."
             },
             "seed": {"type": "integer", "description": "Training RNG seed."},
             "rationale": {
@@ -55,19 +59,27 @@ class TrainDetector(Tool):
                 "description": "Observation-based reason for adaptive detector strategy/hyperparameters."
             },
         },
-        "required": ["lambda_value", "steer_lambda", "strategy"]
+        "required": ["strategy", "rationale"],
     }
 
-    def run(self, lambda_value, steer_lambda, strategy, learning_rate=5e-4, epochs=60,
-            dataset_id=None, n_reference_latents=500, seed=0, rationale="", branch="main",
+    def run(self, strategy=None, learning_rate=None, epochs=None, lambda_value=None,
+            batch_size=None, dataset_id=None, n_reference_latents=None, seed=None,
+            rationale="", branch="main",
             workspace_dir=None, cancel_event=None, **_):
         started = time.monotonic()
         s = _load(workspace_dir, branch=branch)
         _ensure_constraints(s, branch)
+        if _.get("steer_lambda") is not None:
+            raise ValueError("IROS2026 has no steer_lambda or steering prediction loss; remove that argument")
         previous_detector = s.get("active_detector")
-        if s.get("round_status", "ready") not in ("ready", "detector_ready"):
+        legacy_restart = (
+            (s.get("detector") or {}).get("architecture") != DETECTOR_ARCHITECTURE
+            and s.get("round_status") in ("scored", "partitioned")
+            and not s.get("active_clean_dataset")
+        )
+        if s.get("round_status", "ready") not in ("ready", "detector_ready") and not legacy_restart:
             raise ValueError("Detector training is only allowed before scoring the current D_t")
-        if s.get("latest_scores"):
+        if s.get("latest_scores") and not legacy_restart:
             raise ValueError("Current round is already scored; detector changes would invalidate downstream lineage")
         if s.get("round_status") == "resolved":
             raise ValueError("Current round is already resolved; commit it before training the next detector")
@@ -76,18 +88,12 @@ class TrainDetector(Tool):
             "learning_rate": learning_rate,
             "epochs": epochs,
             "lambda_value": lambda_value,
-            "steer_lambda": steer_lambda,
+            "batch_size": batch_size,
             "n_reference_latents": n_reference_latents,
             "seed": seed,
         }
         effective, decision_source = effective_action(s, "detector", proposed)
-        strategy = effective.get("strategy", strategy)
-        learning_rate = effective.get("learning_rate", learning_rate)
-        epochs = effective.get("epochs", epochs)
-        lambda_value = effective.get("lambda_value", lambda_value)
-        steer_lambda = effective.get("steer_lambda", steer_lambda)
-        n_reference_latents = effective.get("n_reference_latents", n_reference_latents)
-        seed = int(effective.get("seed", seed))
+        strategy = effective.get("strategy")
         if decision_source.startswith("agent") and not rationale.strip():
             raise ValueError("Adaptive detector decisions require an observation-based rationale")
         if decision_source == "fixed_policy" and not rationale.strip():
@@ -98,7 +104,14 @@ class TrainDetector(Tool):
             raise ValueError("Unknown detector strategy")
         if strategy == "reuse" and not s.get("active_detector"):
             raise ValueError("No existing detector to reuse")
-        effective = {**effective, "applied_strategy": strategy}
+        if effective.get("steer_lambda") is not None:
+            raise ValueError("Legacy detector policy contains steer_lambda; preregister an IROS2026 policy")
+        if strategy == "reuse" and (s.get("detector") or {}).get("architecture") != DETECTOR_ARCHITECTURE:
+            raise ValueError("Legacy detector checkpoint cannot be reused; select strategy=retrain for IROS2026")
+
+        recs = _records(workspace_dir, branch=branch)
+        if len(recs) < 10:
+            raise ValueError("Insufficient training samples")
 
         detector_id = (
             s.get("active_detector") if strategy == "reuse"
@@ -108,39 +121,71 @@ class TrainDetector(Tool):
 
         c = s.get("constraints") or {}
         lock0 = (s["round"] == 0 and c.get("lock_round0_detector", False))
-        if lock0:
+        detector_meta = s.get("detector") or {}
+        if strategy == "reuse":
+            actual_lr = float(detector_meta.get("learning_rate"))
+            actual_epochs = int(
+                detector_meta.get("configured_epochs", detector_meta.get("epochs_used", 0))
+            )
+            actual_lambda = float(detector_meta.get("lambda"))
+            actual_n_reference_latents = int(detector_meta["n_reference_latents"])
+            batch_size = int(detector_meta["batch_size"])
+            seed = int(detector_meta.get("seed", 0))
+            epoch_msg = "Reusing the existing detector and its recorded training configuration"
+        elif lock0:
             actual_lr = 5e-4
             actual_epochs = 10
             actual_lambda = 1.0
-            actual_steer_lambda = 1.0
+            actual_n_reference_latents = max(1, len(recs) // 50)
+            batch_size = 256
+            seed = 0
             epoch_msg = "Round 0 detector hyper-params locked (constraint lock_round0_detector)"
         else:
-            actual_lr = float(learning_rate)
-            actual_epochs = int(epochs)
-            actual_lambda = float(lambda_value)
-            actual_steer_lambda = float(steer_lambda)
+            training_fields = (
+                "learning_rate", "epochs", "lambda_value", "seed",
+            )
+            missing = [name for name in training_fields if effective.get(name) is None]
+            if missing:
+                raise ValueError(
+                    "Detector retraining requires explicit decisions for: "
+                    + ", ".join(missing)
+                )
+            actual_lr = float(effective["learning_rate"])
+            actual_epochs = int(effective["epochs"])
+            actual_lambda = float(effective["lambda_value"])
+            reference_count = effective.get("n_reference_latents")
+            actual_n_reference_latents = (
+                max(1, len(recs) // 50) if reference_count is None else int(reference_count)
+            )
+            batch_size = 256 if effective.get("batch_size") is None else int(effective["batch_size"])
+            seed = int(effective["seed"])
             allowed_lambdas = {0.1, 0.5, 1.0, 2.0, 5.0, 10.0}
             if not 5e-6 <= actual_lr <= 5e-4:
                 raise ValueError("learning_rate must be in [5e-6, 5e-4]")
-            if not 10 <= actual_epochs <= 120:
-                raise ValueError("epochs must be in [10, 120]")
-            if actual_lambda not in allowed_lambdas or actual_steer_lambda not in allowed_lambdas:
-                raise ValueError("lambda_value and steer_lambda must use an allowed value")
-            if not 10 <= int(n_reference_latents) <= 5000:
-                raise ValueError("n_reference_latents must be in [10, 5000]")
+            if not 1 <= actual_epochs <= 120:
+                raise ValueError("epochs must be in [1, 120]")
+            if actual_lambda not in allowed_lambdas:
+                raise ValueError("lambda_value must use an allowed value")
+            if not 1 <= actual_n_reference_latents <= len(recs):
+                raise ValueError("n_reference_latents must be between 1 and the dataset size")
+            if not 1 <= batch_size <= 512:
+                raise ValueError("batch_size must be in [1, 512]")
             epoch_msg = f"Agent specified {actual_epochs} epochs, lr={actual_lr}"
 
-        # Compute this only after the lock/default policy has resolved the
-        # effective epoch count.  Referencing actual_epochs before this point
-        # made every first detector-training call fail at runtime.
+        effective = {
+            **effective,
+            "applied_strategy": strategy,
+            "learning_rate": actual_lr,
+            "epochs": actual_epochs,
+            "lambda_value": actual_lambda,
+            "batch_size": batch_size,
+            "n_reference_latents": actual_n_reference_latents,
+            "seed": seed,
+        }
+
+        # Compute this only after the adaptive/fixed/reuse policy has resolved
+        # the effective epoch count.
         epochs_consumed = actual_epochs if strategy == "retrain" else 0
-
-        batch_size = 64
-
-        recs = _records(workspace_dir, branch=branch)
-
-        if len(recs) < 10:
-            raise ValueError("Insufficient training samples")
 
         if strategy == "retrain":
             used_epochs = int(s.get("detector_train_epochs_used", 0))
@@ -159,7 +204,7 @@ class TrainDetector(Tool):
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
         train_generator = torch.Generator().manual_seed(seed)
-        model = UnifiedCAE().to(device)
+        model = IROS2026CAE().to(device)
 
         if strategy == "reuse":
             detector_meta = s.get("detector") or {}
@@ -190,48 +235,49 @@ class TrainDetector(Tool):
             optimizer = torch.optim.Adam(model.parameters(), lr=actual_lr)
             mse = nn.MSELoss()
 
-            ref_latents = None
-            ref_indices = None
-            warmup_epochs = max(1, actual_epochs // 5)
-            if actual_lambda > 0:
-                ref_size = min(int(n_reference_latents), len(recs))
-                ref_indices = torch.randperm(len(recs), generator=train_generator)[:ref_size]
-                print(
-                    f"\n[Train Detector] Reference manifold will be frozen after "
-                    f"{warmup_epochs} warm-up epochs ({ref_size} samples).",
-                    flush=True,
-                )
+            # Match IROS2026: sample 2% of D_t, encode with the INITIAL model
+            # in eval mode, then freeze these latents for the entire training.
+            # Batch the reference pass so it does not load all RGB images on GPU.
+            ref_indices = np.random.RandomState(seed).choice(
+                len(recs), size=actual_n_reference_latents, replace=False,
+            )
+            reference_loader = DataLoader(
+                Subset(dataset, ref_indices.tolist()), batch_size=batch_size, shuffle=False,
+            )
+            model.eval()
+            references = []
+            with torch.no_grad():
+                for ref_imgs, ref_steers, _idx in reference_loader:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise InterruptedError("Detector reference initialization cancelled")
+                    _, ref = model(ref_imgs.to(device), ref_steers.to(device))
+                    references.append(ref.detach())
+            ref_latents = torch.cat(references)
+            del references, reference_loader
 
-            total_l = total_rec = total_reg = total_pred = 0.0
+            total_l = total_rec = total_reg = 0.0
             print(f"\n==================================================", flush=True)
-            print(f"[Train Detector] Starting UnifiedCAE Model Training", flush=True)
+            print(f"[Train Detector] Starting IROS2026 action-conditioned CAE training", flush=True)
             print(f" -> Device          : {device}", flush=True)
             print(f" -> Training Samples: {len(recs)}", flush=True)
             print(f" -> Epoch Strategy  : {epoch_msg}", flush=True)
             print(f" -> Learning Rate   : {actual_lr}", flush=True)
             print(f" -> Batch Size      : {batch_size}", flush=True)
-            print(f" -> Hyperparameters : lambda={actual_lambda}, steer_lambda={actual_steer_lambda}", flush=True)
+            print(f" -> Reference loss  : lambda={actual_lambda}, {actual_n_reference_latents} frozen initial latents, active from epoch 1", flush=True)
             print(f"==================================================", flush=True)
 
             try:
                 for epoch in range(actual_epochs):
                     if cancel_event is not None and cancel_event.is_set():
                         raise InterruptedError("Detector training cancelled")
-                    if actual_lambda > 0 and ref_latents is None and epoch == warmup_epochs:
-                        model.eval()
-                        with torch.no_grad():
-                            ref_imgs = torch.stack([dataset[int(i)][0] for i in ref_indices]).to(device)
-                            _, ref_latents, _ = model(ref_imgs)
-                            ref_latents = ref_latents.detach()
-                        del ref_imgs
                     model.train()
-                    ep_l = ep_rec = ep_reg = ep_pred = 0.0
+                    ep_l = ep_rec = ep_reg = 0.0
                     ep_n = 0
                     for imgs, steers, _ in dataloader:
                         if cancel_event is not None and cancel_event.is_set():
                             raise InterruptedError("Detector training cancelled")
                         imgs, steers = imgs.to(device), steers.to(device)
-                        recon, latent, steer_pred = model(imgs)
+                        recon, latent = model(imgs, steers)
 
                         l_rec = mse(recon, imgs)
                         l_reg = torch.tensor(0.0, device=device)
@@ -240,8 +286,9 @@ class TrainDetector(Tool):
                             nearest = ref_latents[torch.argmin(dists, dim=1)]
                             l_reg = (latent - nearest).pow(2).mean()
 
-                        l_pred = (steer_pred - steers).pow(2).mean() if actual_steer_lambda > 0 else torch.tensor(0.0, device=device)
-                        loss = l_rec + actual_lambda * l_reg + actual_steer_lambda * l_pred
+                        loss = l_rec + actual_lambda * l_reg
+                        if not torch.isfinite(loss):
+                            raise RuntimeError("Detector training produced non-finite loss")
 
                         optimizer.zero_grad()
                         loss.backward()
@@ -250,18 +297,16 @@ class TrainDetector(Tool):
                         total_l += loss.item()
                         total_rec += l_rec.item()
                         total_reg += l_reg.item()
-                        total_pred += l_pred.item()
-                        ep_l += loss.item(); ep_rec += l_rec.item(); ep_reg += l_reg.item(); ep_pred += l_pred.item(); ep_n += 1
+                        ep_l += loss.item(); ep_rec += l_rec.item(); ep_reg += l_reg.item(); ep_n += 1
 
                     print_progress(f"[Train Detector] Epoch {epoch+1}/{actual_epochs} done | "
-                                   f"loss={ep_l/ep_n:.4f} rec={ep_rec/ep_n:.4f} pred={ep_pred/ep_n:.4f}")
+                                   f"loss={ep_l/ep_n:.4f} rec={ep_rec/ep_n:.4f} ref={actual_lambda*ep_reg/ep_n:.4f}")
 
                 n_batches = len(dataloader) * actual_epochs
                 loss_summary = {
                     "total": round(total_l / n_batches, 5),
                     "reconstruction": round(total_rec / n_batches, 5),
                     "latent_reference": round(actual_lambda * (total_reg / n_batches), 5),
-                    "steering_prediction": round(actual_steer_lambda * (total_pred / n_batches), 5)
                 }
                 if not all(math.isfinite(value) for value in loss_summary.values()):
                     raise RuntimeError("Detector training produced non-finite loss")
@@ -284,14 +329,25 @@ class TrainDetector(Tool):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
+        if legacy_restart:
+            # Keep old artifacts on disk, but do not let their score direction
+            # survive into a newly trained detector's downstream actions.
+            for key in ("latest_scores", "latest_partition", "score_round", "score_detector_id", "score_contract"):
+                s[key] = None
+            for stage in ("score_and_fit", "partition", "resolve", "evaluate"):
+                (s.get("latest_observation") or {}).pop(stage, None)
+        s.pop("score_alpha", None)
         s["active_detector"] = detector_id
         s["detector"] = {
             "id": detector_id, "strategy": strategy, "training_source": train_source,
-            "round": s.get("round", 0),
+            "round": detector_meta.get("round", s.get("round", 0)) if strategy == "reuse" else s.get("round", 0),
             "learning_rate": actual_lr, "epochs_used": epochs_consumed,
             "configured_epochs": actual_epochs,
-            "lambda": actual_lambda, "steer_lambda": actual_steer_lambda, "batch_size": batch_size,
-            "seed": seed,
+            "lambda": actual_lambda, "batch_size": batch_size,
+            "architecture": DETECTOR_ARCHITECTURE,
+            "reference_initialization": "frozen_before_first_optimizer_step",
+            "score_contract": score_contract(),
+            "n_reference_latents": actual_n_reference_latents, "seed": seed,
             "input_shape": [IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH],
             "input_contract_version": INPUT_CONTRACT_VERSION,
             "loss": loss_summary
@@ -310,7 +366,11 @@ class TrainDetector(Tool):
             "detector_id": detector_id, "strategy": strategy, "training_source": train_source,
             "learning_rate": actual_lr, "epochs_used": epochs_consumed,
             "configured_epochs": actual_epochs,
-            "lambda_value": actual_lambda, "steer_lambda": actual_steer_lambda,
+            "lambda_value": actual_lambda,
+            "architecture": DETECTOR_ARCHITECTURE,
+            "reference_initialization": "frozen_before_first_optimizer_step",
+            "score_contract": score_contract(),
+            "n_reference_latents": actual_n_reference_latents,
             "batch_size": batch_size, "seed": seed,
             "device": str(device),
             "duration_seconds": round(time.monotonic() - started, 6),

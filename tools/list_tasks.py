@@ -35,7 +35,7 @@ class ListTasks(Tool):
                 "task_id": task_id,
                 "description": spec.get("description", ""),
                 "execution_mode": spec.get("execution_mode", "adaptive_agent"),
-                "transition_policy": spec.get("transition_policy", "clean_only"),
+                "transition_policy": spec.get("transition_policy", "deploy_collect_merge"),
                 "configured": False,
                 "round": None,
                 "deployments": None,

@@ -218,9 +218,11 @@ Research contract:
 - The conversation is the task-control interface. Infer the current goal from the user's latest message together with relevant dialogue history; do not replace that interaction with a fixed pipeline or an internal mode switch. If the user explicitly requests one operation (for example, train the detector for 15 epochs), perform that operation, report its result, and stop. If the user explicitly requests a multi-step outcome (for example, complete one cleaning round), continue observing and deciding until that outcome is reached, blocked, or requires clarification. If the intended boundary is materially ambiguous, ask the user before changing state.
 - Never infer downstream work merely because it is the conventional next pipeline stage. Conversely, when the user has clearly requested an end-to-end outcome, do not stop after each tool and ask for ritual approval. The action sequence must be driven by the conversational goal and current evidence, not by a hard-coded checklist.
 - The agent is unsupervised. Never infer or request hidden evaluation labels, AUC, precision, recall, F1, purity, or other held-out results when making decisions.
+- evaluate is an optional, observation-only data report, not a hidden-label evaluator: it plots ALL pre-partition D_t PCC scores and reports source retention using actual final C_t membership, including VLM accepts. Its anonymous counts are visible evidence, not quality metrics. Do not claim retained samples are confirmed normal or removed samples confirmed anomalous. Call it when the user requests a report/plot; it is not a mandatory gate for controller training. An optional round_index selects a completed past round. Each new car collection has a stable anonymous_source derived from its immutable collection_id; reuse that identity across transfer, merge and reports, never renumber sources within a plot.
 - Distinguish user-directed task data composition from data cleaning. If the user explicitly requests per-source counts or caps (for example, one named source at 8000 and every other source at 500), call configure_task_dataset before any experiment episode or training. A source name explicitly supplied by the user may be used only to configure that requested view; never treat its semantic name as evaluation evidence. Do not reinterpret the request as a desired clean output and do not start detector training. If execution has already begun, explain that a new task is required.
 - Dataset editability is an internal runtime capability, not a user approval gate. Before the first experimental action, D_0 remains editable. An explicit user request to train, score, partition, resolve, deploy, or perform another consequential action automatically freezes D_0 as part of that tool call. Call the requested tool directly: never ask the user to "lock" a task, never claim that a separate lock command or UI action is required, and never expose internal DRAFT/LOCKED/RUNNING transaction states as user workflow. After execution begins, a different D_0 requires a new task. A stop=true decision is terminal and makes the task read-only.
-- In round t, D_t is the immutable round input. The canonical dependency path can produce C_t through detector, scoring, partition, and resolution, while controller training/deployment are optional. This is an available experiment graph, not a checklist: do not call a stage merely to complete the pipeline. Observation-only diagnosis, sensitivity analysis, bounded ablations, early stopping, and replanning are valid whenever the task specification and tool dependencies permit them.
+- In round t, D_t is the immutable round input. The capability graph describes legal dependencies, not a default script. It can produce C_t through detector, scoring, partition, and resolution; controller training, deployment, collection, and round transition are included only when the conversational goal calls for them. Observation-only diagnosis, sensitivity analysis, bounded ablations, early stopping, and replanning remain valid.
+- The detector is the IROS2026 action-conditioned CAE: image and recorded steering are encoded separately and their averaged latent reconstructs the image. Its ONLY decision score is raw PCC(image, reconstruction), in [-1,1], HIGHER = more normal (not a probability). There is no steering-prediction head, steer_lambda, alpha/composite weighting, or within-round rescaling. Keep scores >= threshold; send lower scores to gray; optional gray_lower_threshold discards scores below that lower bound. Mean/std candidates use mean MINUS std. Low PCC is a detector suspicion, not a ground-truth anomaly label. Old composite scores and their thresholds are incompatible and must not guide new PCC splits. Select thresholds from current evidence, not a preset retention fraction or mandatory strategy. score_and_fit needs no tunable weighting parameters.
 - A round advances only through commit_round. clean_only commits D_(t+1)=C_t; deploy_collect_merge commits D_(t+1)=C_t union N_t after collected data is transferred.
 - eval_controller returns a unique deployment_run_id. Transfer only that exact run with transfer_eval_results; never guess a "latest" file. The resulting N_t is a task-local CollectionArtifact and never becomes part of the workspace BaseDataset. Pass CollectionArtifact IDs to commit_round, not dataset source names.
 - Respect evaluation_visibility. In heldout_only tasks, do not seek or infer deployment CTE; it is reserved for final comparison. In online_feedback tasks, returned CTE is valid observable feedback.
@@ -230,7 +232,7 @@ Research contract:
 - partition without a threshold and all state/statistical inspection calls are observation-only. If new read-only evidence invalidates an episode before any consequential action, withdraw_experiment_episode records why. If a restart leaves an action executing, use reconcile_interrupted_action and never blindly retry a possibly state-changing action.
 - Do not reveal private chain-of-thought. The protocol fields should contain concise, experiment-auditable evidence and tradeoffs only.
 - When the evidence supports a round-level continue/stop decision, record it explicitly with assess_stopping. Never change constraints after execution begins; a changed preregistered design requires a new task, while tactical choices inside the declared independent variables remain adaptive.
-- Treat task pipeline, experimental variable, hard resource/safety constraints, and dataset fingerprints in <context> as authoritative. Do not change an experimental variable unless the user explicitly changes the task design.
+- Treat explicit fixed_policy, experimental_controls, hard resource/safety constraints, and dataset fingerprints in <context> as authoritative. In adaptive mode, an empty pipeline means no tactical policy was preregistered; the capability graph and default_transition_policy are guidance, not commands to retrain, invoke VLM, deploy, or advance a round. Do not change an explicitly declared experimental variable unless the user changes the task design.
 - Physical deployment/evaluation is controlled through the conversation, as in the original lab implementation. When the user asks to deploy or retry deployment, call the physical tool; do not refuse based on allow_physical_deploy or historical assistant claims about that obsolete gate. A retry in a new user message is a new instruction and may repeat identical tool arguments. A tool failure or unresolved VLM result is not evidence that a sample is anomalous.
 - Treat a structured tool result with status=failed/error/cancelled/rejected as a failed action. Inspect and replan; never describe it as completed.
 - When reporting VLM review, distinguish valid model verdicts from technical outcomes. Report successful_responses, model_unresolved, below-confidence normal verdicts, output_truncated/invalid responses, and endpoint/input failures separately; never summarize technical failures as model uncertainty.
@@ -256,6 +258,7 @@ def health():
         "transfer_eval_results", "commit_round",
     }
     registered = set(Tool._registry)
+    schema_errors = Tool.schema_errors()
     missing = sorted(required_actions - registered)
     module_status = _module_status()
     missing_modules = sorted(
@@ -269,7 +272,7 @@ def health():
         settings_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": (
-            not missing and not missing_modules
+            not missing and not missing_modules and not schema_errors
             and sys.version_info >= (3, 9) and settings_error is None
         ),
         "python": sys.version.split()[0],
@@ -278,6 +281,7 @@ def health():
         "missing_required_modules": missing_modules,
         "module_status": module_status,
         "dependency_import_errors": optional_dependency_errors(),
+        "tool_schema_errors": schema_errors,
         "agent_model_configured": bool(model),
         "settings_error": settings_error,
         "workspace_open": database.current_workspace_dir() is not None,
@@ -431,7 +435,7 @@ async def create_task(request: Request):
             execution_mode=data.get("execution_mode", "adaptive_agent"),
             fixed_policy=data.get("fixed_policy"),
             experimental_controls=data.get("experimental_controls"),
-            transition_policy=data.get("transition_policy", "clean_only"),
+            transition_policy=data.get("transition_policy"),
             dataset_subset=data.get("dataset_subset"),
             evaluation_visibility=data.get("evaluation_visibility"),
             paired_with=data.get("paired_with", ""),
@@ -546,7 +550,9 @@ def task_messages(task_id: str):
 
 @app.post("/api/tasks/{task_id}/evaluate")
 async def evaluate_task(task_id: str, request: Request):
-    """User-controlled hidden evaluation; this tool is not exposed to the agent."""
+    """Generate the same unlabeled PCC/retention report exposed to the Agent."""
+    if task_id in active_turns:
+        raise HTTPException(409, "Wait for the active task operation to finish before generating a report from the UI")
     p = workspace()
     try:
         td = _task_dir(p, task_id, create=False)
@@ -557,15 +563,13 @@ async def evaluate_task(task_id: str, request: Request):
     try:
         evaluator = Tool.get("evaluate")
     except KeyError:
-        raise HTTPException(409, "Evaluation dependencies are not installed")
+        raise HTTPException(409, "Data-report plotting dependencies are not installed")
     body = await request.json()
     try:
         return json.loads(evaluator.run(
             workspace_dir=p,
             branch=task_id,
-            target=body.get("target", "cleandata"),
-            threshold_mode=body.get("threshold_mode", "partition"),
-            detector_id=body.get("detector_id"),
+            round_index=body.get("round_index"),
         ))
     except Exception as exc:
         raise HTTPException(400, str(exc))
@@ -669,7 +673,13 @@ async def chat(chat_id: int, request: Request):
             try:
                 for msg in turn.messages:
                     c.append(msg["role"], msg.get("content"), msg.get("tool_calls"), msg.get("tool_call_id"))
-                yield json.dumps({"type": "done", "usage": turn.usage, "stopped": turn.stopped}) + "\n"
+                yield json.dumps({
+                    "type": "done",
+                    "usage": turn.usage,
+                    "stopped": turn.stopped,
+                    "paused": turn.paused,
+                    "pause_reason": turn.pause_reason,
+                }) + "\n"
             except Exception as e:
                 yield json.dumps({"type": "error", "text": str(e)}) + "\n"
             finally:

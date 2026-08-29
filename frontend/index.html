@@ -240,7 +240,6 @@ input::placeholder,textarea::placeholder{color:var(--text-faint);font-family:var
 .art-row:hover{border-color:var(--text-faint);background:var(--raised)}
 .art-name{font:12px var(--mono);color:var(--text);flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .art-size{font:11px var(--mono);color:var(--text-faint)}
-.eval-panel{background:var(--panel-2);border:1px solid var(--border-soft);border-radius:8px;padding:10px;margin-top:8px}
 
 /* ---------- modal ---------- */
 .modal-mask{position:fixed;inset:0;background:rgba(5,8,12,.55);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px}
@@ -257,13 +256,8 @@ html[data-theme="light"] .modal-mask{background:rgba(20,30,45,.35)}
 .art-img{max-width:100%;height:auto;border-radius:8px;display:block;margin:0 auto;background:#fff}
 
 .eval-json{font:12px/1.5 var(--mono);color:var(--text)}
-.eval-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;margin:8px 0}
-.eval-metric{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:8px;text-align:center}
-.eval-metric b{display:block;font-size:16px;color:var(--accent);font-weight:700}
-.eval-metric span{font-size:10.5px;opacity:.7}
 .eval-tbl{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:6px}
 .eval-tbl td,.eval-tbl th{border:1px solid var(--border);padding:4px 7px;text-align:left}
-.eval-tbl td.k{opacity:.7}
 .eval-sec-title{font-weight:600;margin:10px 0 4px;font-size:11px;letter-spacing:.03em;opacity:.85}
 
 @media(max-width:860px){
@@ -589,8 +583,10 @@ async function loadHealth(){
       el.className='hint err';
       const missing=(h.missing_required_tools||[]).join(', ');
       const modules=(h.missing_required_modules||[]).join(', ');
+      const schemas=(h.tool_schema_errors||[]).join('; ');
       el.textContent=`Runtime incomplete · Python ${h.python}` +
-        (missing?` · Missing tools: ${missing}`:'') + (modules?` · Missing dependencies: ${modules}`:'');
+        (missing?` · Missing tools: ${missing}`:'') + (modules?` · Missing dependencies: ${modules}`:'') +
+        (schemas?` · Invalid tool definitions: ${schemas}`:'') + (h.settings_error?` · Settings: ${h.settings_error}`:'');
     }
   }catch(e){ el.className='hint err'; el.textContent='Failed to inspect runtime health: '+e.message; }
 }
@@ -885,40 +881,34 @@ async function stop(){
   try{ await api('tasks/'+encodeURIComponent(activeTask)+'/stop', {method:'POST'}); }catch(e){}
 }
 
-/* ---------- Open-Loop Evaluate Cards Renderer ---------- */
-async function loadEvalMetricsPanels(){
-  const panels = document.querySelectorAll('.eval-panel[data-metrics]');
-  for(const p of panels){
-    if(p.dataset.loaded) continue;
-    p.dataset.loaded = '1';
-    try{
-      const task = p.dataset.task, name = p.dataset.metrics;
-      const r = await fetch('/api/tasks/'+encodeURIComponent(task)+'/artifact/'+encodeURIComponent(name));
-      const obj = await r.json();
-      p.innerHTML = renderEvalJson(obj);
-    }catch(e){ p.innerHTML = '<div class="hint">Failed to load open-loop metrics: '+escapeHtml(e.message)+'</div>'; }
-  }
-}
-function renderEvalJson(o){
-  const card = (v,s)=>`<div class="eval-metric"><b>${v==null?'–':Number(v).toFixed(4)}</b><span>${escapeHtml(s)}</span></div>`;
+/* ---------- Unlabeled PCC / Source Retention Report ---------- */
+function renderDataReport(o){
   let h = '<div class="eval-json">';
-  h += '<div class="eval-sec-title">Open-Loop Evaluation · '+(escapeHtml(o.target_label||o.target))+' (n='+(o.n_samples==null?'?':o.n_samples)+')</div>';
-  const m = o.metrics_at_threshold||{};
-  const cm = o.cleaning_metrics||{};
-  h += '<div class="eval-grid">'+card(o.auc,'AUC')+card(m.precision,'Precision')+card(m.recall,'Recall')
-     + card(m.f1,'F1')+card(o.retention_purity,'Retention Purity')
-     + card(cm.normal_retention,'Normal Retention')+card(cm.anomaly_leak,'Anomaly Leak')
-     + (o.purity_vs_detector_keep!=null?card(o.purity_vs_detector_keep,'VLM Purity Δ'):'')+'</div>';
-  const cmMat = m.confusion_matrix;
-  if(cmMat){
-    h += '<div class="eval-sec-title">Confusion Matrix (full)</div><table class="eval-tbl">'
-      + '<tr><th></th><th>Kept</th><th>Removed</th></tr>'
-      + '<tr><td class="k">Normal</td><td>'+cmMat.normal_kept+'</td><td>'+cmMat.normal_removed+'</td></tr>'
-      + '<tr><td class="k">Anomaly</td><td>'+cmMat.anomaly_kept+'</td><td>'+cmMat.anomaly_removed+'</td></tr>'
-      + '</table>';
+  h += '<div class="eval-sec-title">Round '+escapeHtml(String(o.round))+' · PCC &amp; Source Retention</div>';
+  h += '<div class="hint">D_t: '+Number(o.input_count)+' · C_t: '+Number(o.kept_count)+' · Removed: '+Number(o.removed_count)+'</div>';
+  h += '<table class="eval-tbl"><tr><th>Source</th><th>Input</th><th>Kept</th><th>Removed</th><th>Retention</th></tr>';
+  for(const row of o.sources||[]){
+    h += '<tr><td>'+escapeHtml(row.source)+'</td><td>'+Number(row.input_count)+'</td><td>'+Number(row.kept_count)
+      +'</td><td>'+Number(row.removed_count)+'</td><td>'+(100*Number(row.retention_rate)).toFixed(2)+'%</td></tr>';
   }
-  h += '</div>';
+  h += '</table><div class="hint">Plot: all pre-partition D_t samples. Kept: actual final C_t, including VLM accepts. Removed means not in C_t, not a confirmed anomaly.</div></div>';
   return h;
+}
+
+async function generateDataReport(){
+  if(!activeTask) return;
+  const button = $('generateReport');
+  const feedback = $('reportFeedback');
+  if(button) button.disabled = true;
+  try{
+    if(feedback) feedback.textContent = 'Generating PCC distribution and source retention report…';
+    await api('tasks/'+encodeURIComponent(activeTask)+'/evaluate', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({round_index:Number($('reportRound').value)})
+    });
+    await refreshAll();
+  }catch(e){ if(feedback) feedback.textContent = 'Report failed: '+e.message; }
+  finally{ if(button) button.disabled = false; }
 }
 
 /* ---------- Tasks & Inspector Rendering ---------- */
@@ -984,7 +974,6 @@ async function refreshActiveDetail(){
   try{ d = await api('tasks/'+encodeURIComponent(activeTask)); }catch(e){}
   updateTaskbar(d);
   renderInspector(d, datasetData);
-  loadEvalMetricsPanels();
 }
 
 function updateTaskbar(d){
@@ -1018,7 +1007,7 @@ function renderInspector(d, ds){
     const stageLabels = {
       ready:'Waiting for round execution',
       detector_ready:'Detector trained',
-      scored:'Anomaly scoring complete',
+      scored:'PCC scoring complete (higher = normal)',
       partitioned:'Dataset partitioned',
       resolved:'Round curation resolved'
     };
@@ -1055,19 +1044,26 @@ function renderInspector(d, ds){
     html += '<div><div class="sec-title">Decision Log (decision_log.md)</div><div class="log-view">'+escapeHtml(d.decision_log)+'</div></div>';
   }
   
-  const ev = state.latest_observation && state.latest_observation.evaluate;
-  if(ev){
-    html += '<div><div class="sec-title">Open-Loop Evaluation ('+(escapeHtml(ev.target_label||ev.target))+')</div>';
-    html += '<div class="hint">n_samples='+ev.n_samples+' · threshold='+(ev.threshold_label||'–')+'</div>';
-    const mj = ev.artifacts && ev.artifacts.metrics_json;
-    if(mj){
-      html += '<div class="eval-panel" data-task="'+escapeHtml(activeTask)+'" data-metrics="'+escapeHtml(mj)+'"><div class="hint">Loading open-loop metrics...</div></div>';
+  const history = state.round_history||[];
+  const reportRounds = history.filter(r=>r.clean_dataset).map(r=>r.round);
+  if(state.active_clean_dataset) reportRounds.push(state.round);
+  if(reportRounds.length){
+    const rounds = [...new Set(reportRounds)].sort((a,b)=>b-a);
+    html += '<div><div class="sec-title">PCC &amp; Source Retention</div>'
+      + '<select id="reportRound">'+rounds.map(r=>'<option value="'+Number(r)+'">Round '+Number(r)+'</option>').join('')+'</select> '
+      + '<button class="btn" id="generateReport" onclick="generateDataReport()">Generate / Refresh Report</button>'
+      + '<div id="reportFeedback" class="hint"></div></div>';
+  }
+  const reports = [...history.map(r=>r.observations?.evaluate), state.latest_observation?.evaluate]
+    .filter(r=>r?.report_kind==='pcc_retention_report').sort((a,b)=>b.round-a.round);
+  for(const [index, ev] of reports.entries()){
+    html += '<details '+(index===0?'open':'')+'><summary>Round '+Number(ev.round)+' · Data Report</summary>'+renderDataReport(ev);
+    const plot = ev.artifacts?.pcc_distribution;
+    if(plot){
+      const url = '/api/tasks/'+encodeURIComponent(activeTask)+'/artifact/'+encodeURIComponent(plot);
+      html += '<img class="art-img" loading="lazy" src="'+escapeHtml(url)+'" alt="All D_t PCC scores for round '+Number(ev.round)+'">';
     }
-    const arts=ev.artifacts||{};
-    const imgs=['score_scatter','roc','score_hist','pr'].filter(k=>arts[k])
-      .map(k=>`<div class="art-row" onclick="openArtifact('${escapeHtml(activeTask)}','${escapeHtml(arts[k])}')"><span class="art-name">${escapeHtml(arts[k])}</span></div>`).join('');
-    if(imgs) html += '<div class="hint" style="margin-top:6px">Click to view plot:</div><div class="art-list" style="margin-top:4px">'+imgs+'</div>';
-    html += '</div>';
+    html += '</details>';
   }
 
   if(d?.artifacts && d.artifacts.length){
@@ -1095,8 +1091,8 @@ async function openArtifact(taskId, name){
     if(/\.json$/i.test(name)){
       try{
         const obj = JSON.parse(txt);
-        if(obj && obj.target && (obj.auc !== undefined || obj.metrics_at_threshold)){
-          body.innerHTML = renderEvalJson(obj);
+        if(obj?.report_kind==='pcc_retention_report'){
+          body.innerHTML = renderDataReport(obj);
           return;
         }
       }catch(e){}

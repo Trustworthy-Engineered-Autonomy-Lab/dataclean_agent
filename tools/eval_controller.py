@@ -10,7 +10,7 @@ from .base import Tool
 from .teacar import (
     TEACar, HOSTNAME, IROS_WS_DIR, CONTROLLER_TARGET_DIR, _remote_absolute_path,
 )
-from .utils import _load, _save, _ensure_constraints, record_observation, append_ledger, print_progress
+from .utils import _load, _save, _ensure_constraints, record_observation, append_ledger, print_progress, _anonymize_source_name
 
 CTE_PROJECT_DIR = _remote_absolute_path(
     os.environ.get("DATACLEAN_CTE_PROJECT_DIR", "/home/shared/projects/zed"),
@@ -98,6 +98,7 @@ class EvalController(Tool):
         
         deployment_run_id = "run_" + uuid.uuid4().hex
         collection_id = "collection_" + uuid.uuid4().hex
+        anonymous_source = _anonymize_source_name(collection_id)
         postfix = deployment_run_id
         data_dir = f"collect_{postfix}"
         data_path = f"data/{data_dir}"
@@ -112,6 +113,7 @@ class EvalController(Tool):
         deployment_run = {
             "deployment_run_id": deployment_run_id,
             "collection_id": collection_id,
+            "anonymous_source": anonymous_source,
             "task_id": branch,
             "round": int(s.get("round", 0)),
             "status": "running",
@@ -238,6 +240,7 @@ class EvalController(Tool):
             "collection_id": collection_id,
             "deployment": d,
             "controller_evaluated": target_file,
+            "anonymous_source": anonymous_source,
             "n_images_target": num_images,
             "collection_images_budget_used": s["collection_images_budget_used"],
             "collection_images_budget_cap": image_budget_cap,

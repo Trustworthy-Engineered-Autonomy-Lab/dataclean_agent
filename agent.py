@@ -24,6 +24,38 @@ _PROTOCOL_MUTATION_TOOLS = {
     "propose_experiment_episode", "assess_experiment_episode",
     "withdraw_experiment_episode", "reconcile_interrupted_action",
 }
+
+
+def _unsupported_request_options(exc, request):
+    """Only downgrade options explicitly rejected by a compatible endpoint.
+
+    Invalid tool schemas, authentication, rate limits and server/network errors
+    must retain their original error instead of causing an unrelated retry.
+    """
+    if getattr(exc, "status_code", None) not in (400, 422) and not isinstance(exc, TypeError):
+        return []
+    body = getattr(exc, "body", None)
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    error = error if isinstance(error, dict) else {}
+    code = str(error.get("code") or getattr(exc, "code", "") or "").lower()
+    parameter = str(error.get("param") or getattr(exc, "param", "") or "")
+    message = str(error.get("message") or exc).lower()
+    if parameter.startswith(("tools", "messages")) or code == "invalid_function_parameters":
+        return []
+    unsupported = code in {"unsupported_parameter", "unknown_parameter"} or any(
+        word in message for word in (
+            "unsupported", "not supported", "unknown parameter", "unrecognized",
+            "unexpected keyword", "extra inputs are not permitted",
+        )
+    )
+    if not unsupported:
+        return []
+    return [key for key in ("stream_options", "seed") if key in request and (
+        parameter == key or parameter.startswith(key + ".")
+        or (not parameter and re.search(r"\b" + key + r"\b", message))
+    )]
+
+
 def _is_state_changing_agent_call(name, args):
     return (
         name == "configure_task_dataset"
@@ -163,6 +195,7 @@ class Turn:
         self.client, self.model, self.history, self.tools, self.context = client, model, history, tools, context or {}
         self.temperature, self.seed = temperature, seed
         self.stop = threading.Event(); self.messages=[]; self.stopped=False
+        self.paused=False; self.pause_reason=None
         self.usage={"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}
         self.max_model_steps=max_model_steps; self.max_tool_calls=max_tool_calls
         self.started_monotonic = time.monotonic()
@@ -253,7 +286,13 @@ class Turn:
             model_steps += 1
             self.model_steps = model_steps
             if model_steps > self.max_model_steps:
-                msg = f"[Agent stopped: model-step limit {self.max_model_steps} reached]"
+                self.paused = True
+                self.pause_reason = "model_step_limit"
+                self.agent_metadata["pause_reason"] = self.pause_reason
+                msg = (
+                    f"本次执行已达到单回合推理步数上限（{self.max_model_steps}）。"
+                    "当前实验状态已经保存，这不是任务失败；请发送“继续”以从当前状态恢复。"
+                )
                 self.messages.append({"role":"assistant", "content":msg})
                 yield {"type":"content", "text":msg}
                 return
@@ -282,23 +321,26 @@ class Turn:
                     request["temperature"] = self.temperature
                 if self.seed is not None:
                     request["seed"] = self.seed
-                try:
-                    stream_context = self.client.chat.completions.create(**request)
-                except Exception:
-                    # Some local OpenAI-compatible backends implement tools and
-                    # streaming but reject reproducibility/usage extensions. A
-                    # model request is read-only, so a pre-stream capability
-                    # fallback is safe and improves lab portability.
-                    fallback_request = dict(request)
-                    fallback_request.pop("stream_options", None)
-                    fallback_request.pop("seed", None)
-                    if fallback_request == request:
-                        raise
-                    self.agent_metadata["request_capability_fallback"] = [
-                        "stream_options", "seed"
-                    ]
-                    self.agent_metadata["effective_seed_parameter"] = None
-                    stream_context = self.client.chat.completions.create(**fallback_request)
+                while True:
+                    self.agent_metadata["api_request_attempts"] = int(
+                        self.agent_metadata.get("api_request_attempts", 0)
+                    ) + 1
+                    try:
+                        stream_context = self.client.chat.completions.create(**request)
+                        break
+                    except Exception as exc:
+                        unsupported = _unsupported_request_options(exc, request)
+                        if not unsupported:
+                            raise
+                        # Each option can be removed at most once. Never strip
+                        # tool definitions or change the model to hide an error.
+                        fallback = self.agent_metadata.setdefault("request_capability_fallback", [])
+                        for key in unsupported:
+                            request.pop(key)
+                            if key not in fallback:
+                                fallback.append(key)
+                        if "seed" in unsupported:
+                            self.agent_metadata["effective_seed_parameter"] = None
                 with stream_context as stream:
                     for chunk in stream:
                         usage = getattr(chunk, "usage", None)
@@ -349,14 +391,49 @@ class Turn:
                     call["id"] = "call_" + uuid.uuid4().hex
             self.messages.append({"role":"assistant","content":content or None,"tool_calls":[{"id":c["id"],"type":"function","function":{"name":c["name"],"arguments":c["arguments"]}} for c in ordered]})
             state_changing_call_seen = False
-            for call in ordered:
+            for call_index, call in enumerate(ordered):
+                if self.stop.is_set():
+                    self.stopped = True
+                    yield from self._cancel_pending_calls(ordered[call_index:])
+                    return
                 tool_calls_used += 1
                 self.tool_calls_used = tool_calls_used
                 if tool_calls_used > self.max_tool_calls:
-                    result = json.dumps({"error": f"tool-call limit {self.max_tool_calls} reached"})
+                    result = json.dumps({
+                        "error": f"tool-call limit {self.max_tool_calls} reached",
+                        "code": "turn_tool_call_limit",
+                        "retryable": True,
+                    })
                     result = _tool_result_envelope(call["name"], result)
                     yield _tool_result_event(call["name"], result)
                     self.messages.append({"role":"tool","content":result,"tool_call_id":call["id"]})
+                    # Complete every tool-call ID emitted in this assistant
+                    # message so the persisted Chat Completions history remains
+                    # valid when the user resumes in a later turn.
+                    for pending in ordered[call_index + 1:]:
+                        pending_result = _tool_result_envelope(
+                            pending["name"],
+                            json.dumps({
+                                "error": "Not executed because the per-turn tool-call limit was reached",
+                                "code": "turn_tool_call_limit",
+                                "retryable": True,
+                            }),
+                        )
+                        yield _tool_result_event(pending["name"], pending_result)
+                        self.messages.append({
+                            "role": "tool",
+                            "content": pending_result,
+                            "tool_call_id": pending["id"],
+                        })
+                    self.paused = True
+                    self.pause_reason = "tool_call_limit"
+                    self.agent_metadata["pause_reason"] = self.pause_reason
+                    msg = (
+                        f"本次执行已达到单回合工具调用上限（{self.max_tool_calls}）。"
+                        "已完成的实验状态已经保存，这不是任务失败；请发送“继续”以恢复。"
+                    )
+                    yield {"type": "content", "text": msg}
+                    self.messages.append({"role": "assistant", "content": msg})
                     return
                 raw = _clean_json_raw(call["arguments"])
                 try: args=json.loads(raw)
@@ -421,6 +498,8 @@ class Turn:
                     continue
                 try:
                     tool=self.tools.get(call["name"])
+                    if not getattr(tool, "agent_exposed", True):
+                        raise KeyError(f"Tool '{call['name']}' is not exposed to the Agent")
                 except KeyError as e:
                     result=json.dumps({"error":str(e)}, ensure_ascii=False)
                     result = _tool_result_envelope(call["name"], result)
@@ -500,6 +579,7 @@ class Turn:
                     result = _tool_result_envelope(call["name"], result)
                     yield _tool_result_event(call["name"], result)
                     self.messages.append({"role":"tool","content":result,"tool_call_id":call["id"]})
+                    yield from self._cancel_pending_calls(ordered[call_index + 1:])
                     return
                 th.join()
                 result = _box["result"] if _box["exc"] is None else json.dumps({"error":str(_box["exc"])})
@@ -523,6 +603,21 @@ class Turn:
                     self._remember_failed_call(operational_signature, result)
                 yield _tool_result_event(call["name"], result)
                 self.messages.append({"role":"tool","content":result,"tool_call_id":call["id"]})
+            if self.stop.is_set():
+                self.stopped = True
+                return
+
+    def _cancel_pending_calls(self, calls):
+        """Complete the API message contract without executing queued actions."""
+        for call in calls:
+            result = _tool_result_envelope(call["name"], {
+                "cancelled": True,
+                "error": "Not executed because the user interrupted this turn",
+                "code": "turn_cancelled",
+                "state_changed": False,
+            })
+            self.messages.append({"role": "tool", "content": result, "tool_call_id": call["id"]})
+            yield _tool_result_event(call["name"], result)
 
 class Agent:
     def __init__(self, api_key, base_url, model, temperature=None, seed=None):

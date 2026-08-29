@@ -83,23 +83,26 @@ def diagnose(workspace=None):
     modules = _module_status()
     registered = set()
     registry_error = None
+    schema_errors = []
     if all(modules[name]["ok"] for name in ("numpy", "PIL")):
         try:
             from tools import Tool
             registered = set(Tool._registry)
+            schema_errors = Tool.schema_errors()
         except Exception as exc:
             registry_error = f"{type(exc).__name__}: {exc}"
     missing_tools = sorted(REQUIRED_TOOLS - registered)
     missing_modules = sorted(name for name, row in modules.items() if not row["ok"])
     python_ok = sys.version_info >= (3, 9)
     report = {
-        "ok": python_ok and not missing_modules and not missing_tools and registry_error is None,
+        "ok": python_ok and not missing_modules and not missing_tools and registry_error is None and not schema_errors,
         "python": platform.python_version(),
         "python_executable": sys.executable,
         "python_supported": python_ok,
         "platform": platform.platform(),
         "modules": modules,
         "tool_registry_error": registry_error,
+        "tool_schema_errors": schema_errors,
         "missing_required_tools": missing_tools,
         "workspace": _workspace_status(workspace),
         "ssh": _ssh_status(),

@@ -8,6 +8,8 @@ from .utils import (
     _records,
 )
 from .agent_protocol import public_protocol_state
+from .policies import agent_pipeline_projection, capability_graph_payload
+from .detector_contract import DETECTOR_ARCHITECTURE, score_contract
 
 
 _ALWAYS_HIDDEN_METRICS = {
@@ -29,7 +31,9 @@ def _agent_visible_projection(value, *, hide_cte):
     return {
         key: _agent_visible_projection(item, hide_cte=hide_cte)
         for key, item in value.items()
-        if key not in hidden and key not in {"evaluate", "allow_physical_deploy"}
+        if key not in hidden and key != "allow_physical_deploy"
+        # Existing task files may still contain old labeled evaluations.
+        and (key != "evaluate" or (isinstance(item, dict) and item.get("report_kind") == "pcc_retention_report"))
     }
 
 class PipelineState(Tool):
@@ -66,7 +70,7 @@ class PipelineState(Tool):
         active_samples = s.get("round_input_count")
         active_comp = None
         round_input_error = None
-        if ds:
+        if s.get("round_input_dataset"):
             try:
                 recs = _records(workspace_dir, branch=branch)
                 if active_samples is None:
@@ -91,6 +95,11 @@ class PipelineState(Tool):
             else ("not_started" if dataset_editable else "started")
         )
 
+        execution_mode = s.get(
+            "execution_mode", spec.get("execution_mode", "adaptive_agent")
+        )
+        declared_pipeline = s.get("pipeline") or spec.get("pipeline") or {}
+
         out = {
             "state_schema_version": s.get("schema_version", 1),
             "branch": branch,
@@ -99,11 +108,17 @@ class PipelineState(Tool):
                 "description": spec.get("description", branch),
                 "hypothesis": spec.get("hypothesis", ""),
                 "independent_variable": spec.get("independent_variable", ""),
-                "execution_mode": s.get("execution_mode", spec.get("execution_mode", "adaptive_agent")),
-                "pipeline": s.get("pipeline") or spec.get("pipeline") or {},
+                "execution_mode": execution_mode,
+                "pipeline": agent_pipeline_projection(
+                    declared_pipeline, execution_mode
+                ),
+                "capability_graph": capability_graph_payload(),
                 "experimental_controls": s.get("experimental_controls") or {},
                 "fixed_policy": s.get("fixed_policy") if s.get("execution_mode") == "fixed_baseline" else None,
-                "default_transition_policy": s.get("default_transition_policy", spec.get("transition_policy", "clean_only")),
+                "default_transition_policy": s.get(
+                    "default_transition_policy",
+                    spec.get("transition_policy", "deploy_collect_merge"),
+                ),
             },
             "round": s.get("round", 0),
             # DRAFT/LOCKED/RUNNING are internal transaction states. Expose the
@@ -119,6 +134,10 @@ class PipelineState(Tool):
             "round_status": s.get("round_status", "ready"),
             "deployments": s.get("deployments", 0),
             "active_detector": s.get("active_detector"),
+            "detector_architecture": (s.get("detector") or {}).get("architecture"),
+            "available_detector_architecture": DETECTOR_ARCHITECTURE,
+            "available_score_contract": score_contract(),
+            "active_score_contract": s.get("score_contract"),
             "active_controller": {
                 "id": (s.get("active_controller") or {}).get("id"),
                 "trained_on_round": (s.get("active_controller") or {}).get("round"),
@@ -159,6 +178,7 @@ class PipelineState(Tool):
                 {
                     "deployment_run_id": run.get("deployment_run_id"),
                     "collection_id": run.get("collection_id"),
+                    "anonymous_source": _anonymize_source_name(run.get("collection_id")),
                     "round": run.get("round"),
                     "status": run.get("status"),
                     "controller_id": run.get("controller_id"),

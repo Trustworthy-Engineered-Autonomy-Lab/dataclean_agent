@@ -1,8 +1,8 @@
 import json
-from pathlib import Path
 import numpy as np
 from .base import Tool
 from .decision_policy import effective_action, record_decision
+from .detector_contract import normality_scores, score_contract
 from .utils import (_load, _save, _ensure_constraints, record_observation,
                     append_ledger, _task_artifact_reference)
 
@@ -10,7 +10,8 @@ from .utils import (_load, _save, _ensure_constraints, record_observation,
 class Partition(Tool):
     name = "partition"
     description = (
-        "Partition dataset using anomaly score threshold into retained (keep) and candidate anomaly (gray) regions. "
+        "Partition raw PCC normality scores: keep >= threshold, gray < threshold. "
+        "Optionally discard scores < gray_lower_threshold (lower than the keep threshold). "
         "Omit threshold to calculate data-driven threshold candidates (Otsu, KDE valley, bimodal) and score statistics."
     )
     parameters = {
@@ -18,11 +19,11 @@ class Partition(Tool):
         "properties": {
             "threshold": {
                 "type": "number",
-                "description": "Keep/gray lower threshold. Omit to run candidate analysis only.",
+                "description": "PCC keep boundary: scores >= threshold are retained. Omit for analysis only.",
             },
-            "gray_upper_threshold": {
+            "gray_lower_threshold": {
                 "type": "number",
-                "description": "Optional gray/discard upper threshold. Scores at or above it are confident detector discards and are not sent to VLM.",
+                "description": "Optional lower PCC boundary (< threshold). Scores below it are discarded without VLM; scores between boundaries form gray.",
             },
             "rationale": {
                 "type": "string",
@@ -32,10 +33,12 @@ class Partition(Tool):
         "required": [],
     }
 
-    def run(self, threshold=None, gray_upper_threshold=None, rationale=None,
+    def run(self, threshold=None, gray_lower_threshold=None, rationale=None,
             branch="main", workspace_dir=None, **_):
         s = _load(workspace_dir, branch=branch)
         _ensure_constraints(s, branch)
+        if _.get("gray_upper_threshold") is not None:
+            raise ValueError("PCC is high-normal: use gray_lower_threshold, not legacy gray_upper_threshold")
         if s.get("round_status") not in ("scored", "partitioned"):
             raise ValueError("Partition requires current-round scores and cannot run after resolution")
         if not s.get("latest_scores"):
@@ -46,9 +49,7 @@ class Partition(Tool):
             workspace_dir, branch, s["latest_scores"]
         )
         rec = json.loads(score_path.read_text())
-        scores = np.array([r["anomaly_score"] for r in rec], dtype=float)
-        if len(scores) == 0 or not np.all(np.isfinite(scores)):
-            raise ValueError("Score artifact is empty or contains non-finite anomaly scores")
+        scores = np.array(normality_scores(rec), dtype=float)
 
         candidates = self._compute_candidates(scores)
         stats = self._score_stats(scores)
@@ -56,6 +57,7 @@ class Partition(Tool):
         if threshold is None:
             summary = {
                 "mode": "analyze",
+                "score_contract": score_contract(),
                 "n_samples": int(len(rec)),
                 "candidates": candidates,
                 "score_stats": stats,
@@ -66,8 +68,8 @@ class Partition(Tool):
 
         proposed = {
             "threshold": float(threshold),
-            "gray_upper_threshold": (
-                None if gray_upper_threshold is None else float(gray_upper_threshold)
+            "gray_lower_threshold": (
+                None if gray_lower_threshold is None else float(gray_lower_threshold)
             ),
         }
         effective, source = effective_action(s, "partition", proposed)
@@ -80,8 +82,10 @@ class Partition(Tool):
                     raise ValueError("fixed partition rule requires value")
                 thr = float(effective["value"])
             elif rule == "mean_std":
-                thr = float(candidates["mean_plus_std_threshold"])
+                thr = float(candidates["mean_minus_std_threshold"])
             elif rule == "otsu":
+                if candidates["otsu_threshold"] is None:
+                    raise ValueError("Fixed Otsu baseline is undefined for this score distribution")
                 thr = float(candidates["otsu_threshold"])
             elif rule == "kde_valley":
                 if candidates["kde_valley_threshold"] is None:
@@ -89,43 +93,48 @@ class Partition(Tool):
                 thr = float(candidates["kde_valley_threshold"])
             else:
                 raise ValueError(f"Unknown fixed partition rule: {rule}")
-            upper_rule = effective.get("gray_upper_rule", "none")
-            if upper_rule == "none":
-                upper = None
-            elif upper_rule == "fixed":
-                if effective.get("gray_upper_value") is None:
-                    raise ValueError("fixed gray upper rule requires gray_upper_value")
-                upper = float(effective["gray_upper_value"])
-            elif upper_rule == "mean_plus_2std":
-                upper = float(np.mean(scores) + 2.0 * np.std(scores))
-            elif upper_rule == "quantile":
-                q = float(effective.get("gray_upper_quantile", 0.95))
+            if any(key.startswith("gray_upper") for key in effective):
+                raise ValueError("Legacy fixed partition policy must be preregistered for high-normal PCC")
+            lower_rule = effective.get("gray_lower_rule", "none")
+            if lower_rule == "none":
+                lower = None
+            elif lower_rule == "fixed":
+                if effective.get("gray_lower_value") is None:
+                    raise ValueError("fixed gray lower rule requires gray_lower_value")
+                lower = float(effective["gray_lower_value"])
+            elif lower_rule == "mean_minus_2std":
+                lower = float(np.mean(scores) - 2.0 * np.std(scores))
+            elif lower_rule == "quantile":
+                q = float(effective.get("gray_lower_quantile", 0.05))
                 if not 0 < q < 1:
-                    raise ValueError("gray_upper_quantile must be in (0, 1)")
-                upper = float(np.quantile(scores, q))
+                    raise ValueError("gray_lower_quantile must be in (0, 1)")
+                lower = float(np.quantile(scores, q))
             else:
-                raise ValueError(f"Unknown fixed gray upper rule: {upper_rule}")
-            effective = {**effective, "threshold": thr, "gray_upper_threshold": upper}
+                raise ValueError(f"Unknown fixed gray lower rule: {lower_rule}")
+            effective = {**effective, "threshold": thr, "gray_lower_threshold": lower}
             rationale = rationale or f"Preregistered fixed baseline rule: {rule}"
         else:
             thr = float(effective["threshold"])
-            upper = effective.get("gray_upper_threshold")
-            upper = None if upper is None else float(upper)
+            if effective.get("gray_upper_threshold") is not None:
+                raise ValueError("Legacy gray_upper_threshold control is incompatible with high-normal PCC")
+            lower = effective.get("gray_lower_threshold")
+            lower = None if lower is None else float(lower)
             if not rationale or not str(rationale).strip():
                 raise ValueError("Adaptive partition decisions require an observation-based rationale")
         if not np.isfinite(thr):
             raise ValueError("threshold must be finite")
-        if upper is not None and (not np.isfinite(upper) or upper <= thr):
-            raise ValueError("gray_upper_threshold must be finite and greater than threshold")
-        keep = [r for r in rec if r["anomaly_score"] < thr]
+        if lower is not None and (not np.isfinite(lower) or lower >= thr):
+            raise ValueError("gray_lower_threshold must be finite and less than threshold")
+        keep = [r for r in rec if r["normality_score"] >= thr]
         gray = [
             r for r in rec
-            if r["anomaly_score"] >= thr and (upper is None or r["anomaly_score"] < upper)
+            if r["normality_score"] < thr and (lower is None or r["normality_score"] >= lower)
         ]
-        discard = [] if upper is None else [r for r in rec if r["anomaly_score"] >= upper]
+        discard = [] if lower is None else [r for r in rec if r["normality_score"] < lower]
         s["latest_partition"] = {
-            "threshold": round(thr, 5),
-            "gray_upper_threshold": None if upper is None else round(upper, 5),
+            "threshold": thr,
+            "gray_lower_threshold": lower,
+            "score_contract": score_contract(),
             "threshold_method": method,
             "keep_ids": [r["id"] for r in keep],
             "gray_ids": [r["id"] for r in gray],
@@ -147,12 +156,13 @@ class Partition(Tool):
         )
         summary = {
             "mode": "split",
-            "threshold_applied": round(thr, 5),
+            "threshold_applied": thr,
+            "score_contract": score_contract(),
             "keep_count": int(len(keep)),
             "gray_count": int(len(gray)),
             "discard_count": int(len(discard)),
             "keep_ratio": round(len(keep) / max(1, len(rec)), 5),
-            "gray_upper_threshold": None if upper is None else round(upper, 5),
+            "gray_lower_threshold": lower,
             "threshold_method": method,
             "decision_source": source,
             "candidates": candidates,
@@ -169,7 +179,7 @@ class Partition(Tool):
         append_ledger(s, {
             "stage": "partition",
             "round": s.get("round"),
-            "threshold": round(thr, 5),
+            "threshold": thr,
             "keep": int(len(keep)),
             "gray": int(len(gray)),
             "discard": int(len(discard)),
@@ -185,12 +195,12 @@ class Partition(Tool):
             "kde_valley_threshold": self._kde_valley(scores),
             "bimodality_coefficient": bc,
             "is_bimodal": is_bimodal,
-            "mean_plus_std_threshold": round(float(np.mean(scores) + np.std(scores)), 5),
+            "mean_minus_std_threshold": round(float(np.mean(scores) - np.std(scores)), 5),
         }
 
     @staticmethod
     def _otsu_threshold(scores):
-        if len(scores) < 3:
+        if len(scores) < 3 or float(np.ptp(scores)) == 0.0:
             return None
         n_bins = min(128, max(10, len(scores) // 10))
         hist, edges = np.histogram(scores, bins=n_bins)
@@ -239,6 +249,8 @@ class Partition(Tool):
 
     @staticmethod
     def _bimodality_coefficient(scores):
+        if len(scores) < 4 or float(np.ptp(scores)) == 0.0:
+            return None
         try:
             from scipy.stats import skew, kurtosis
         except Exception:
@@ -250,6 +262,8 @@ class Partition(Tool):
         # The finite-sample BC formula expects excess kurtosis here. Using
         # Pearson kurtosis and then adding the correction double-counted 3.
         g2 = float(kurtosis(scores, fisher=True, bias=False))
+        if not np.isfinite(g1) or not np.isfinite(g2):
+            return None
         if n > 3:
             denom = g2 + 3.0 * (n - 1) ** 2 / ((n - 2) * (n - 3))
         else:
@@ -258,13 +272,6 @@ class Partition(Tool):
             return None
         bc = (g1 ** 2 + 1) / denom
         return round(float(bc), 5)
-
-    @staticmethod
-    def _bimodal_threshold(scores):
-        bc = Partition._bimodality_coefficient(scores)
-        if bc is None or bc < 0.555:
-            return None
-        return Partition._kde_valley(scores)
 
     @staticmethod
     def _score_stats(scores):

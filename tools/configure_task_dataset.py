@@ -145,7 +145,10 @@ class ConfigureTaskDataset(Tool):
                 "for a different D_0 composition"
             )
         protocol = public_protocol_state(workspace_dir, branch)
-        if protocol.get("executing_action") or protocol.get("last_action"):
+        # An unchanged failed attempt can legitimately restore DRAFT. Its
+        # audit entry remains, but must not override the state/budget/lineage
+        # mutability checks above and permanently block dataset correction.
+        if protocol.get("executing_action"):
             raise ValueError(
                 "Close the current experiment activity and create a new task before changing D_0"
             )

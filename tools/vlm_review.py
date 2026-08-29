@@ -11,6 +11,7 @@ from .utils import (
     VLM_PROMPT_VERSION, vlm_prompt_hash,
 )
 from .io import _task_artifact_reference
+from .detector_contract import normality_scores, require_partition_contract, review_rank
 
 
 def run_vlm_review(workspace_dir, s, branch, budget, sampling_strategy, accept_confidence,
@@ -19,6 +20,7 @@ def run_vlm_review(workspace_dir, s, branch, budget, sampling_strategy, accept_c
     p = s.get("latest_partition")
     if not p:
         raise ValueError("Must run partition before executing VLM review.")
+    require_partition_contract(p)
 
     _reset_vlm_budget_if_new_round(s)
 
@@ -34,6 +36,7 @@ def run_vlm_review(workspace_dir, s, branch, budget, sampling_strategy, accept_c
         _task_artifact_reference(workspace_dir, branch, scores_ref).read_text()
     )
     scored_map = {r["id"]: r for r in scored}
+    normality_scores(scored)
     gray_candidates = [scored_map[i] for i in p.get("gray_ids", []) if i in scored_map]
     if not gray_candidates:
         return {
@@ -52,19 +55,9 @@ def run_vlm_review(workspace_dir, s, branch, budget, sampling_strategy, accept_c
 
     threshold = float(p.get("threshold", 0.0))
 
-    def rank(r):
-        score = r["anomaly_score"]
-        if sampling_strategy == "pollution_defense":
-            return -score
-        if sampling_strategy == "rare_behavior_recovery":
-            return (0 if abs(r["steering"]) >= .35 else 1, abs(score - threshold))
-        if sampling_strategy == "information_gain":
-            return abs(score - threshold)
-        if sampling_strategy == "verification":
-            return -abs(score - threshold)
-        raise ValueError(f"Unknown sampling_strategy: {sampling_strategy}")
-
-    selected = sorted(gray_candidates, key=rank)[:n]
+    selected = sorted(
+        gray_candidates, key=lambda r: review_rank(r, sampling_strategy, threshold),
+    )[:n]
     cfg = resolve_vlm_config(vlm_model, vlm_base_url, vlm_api_key, state_vlm=s.get("vlm"))
     client = _get_vlm_client(cfg)
     levels = {"low": 0, "medium": 1, "high": 2}
@@ -122,6 +115,7 @@ def run_vlm_review(workspace_dir, s, branch, budget, sampling_strategy, accept_c
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}}
                 ]}],
                 temperature=0.1,
+                extra_body={"chat_template_kwargs": dict(cfg["chat_template_kwargs"])},
             )
             if cfg["max_tokens"] is not None:
                 request["max_tokens"] = cfg["max_tokens"]
@@ -189,6 +183,7 @@ def run_vlm_review(workspace_dir, s, branch, budget, sampling_strategy, accept_c
             "content_type": response_meta.get("content_type"),
             "has_reasoning_content": bool(response_meta.get("has_reasoning_content")),
             "request_max_tokens": cfg["max_tokens"],
+            "request_enable_thinking": cfg["chat_template_kwargs"]["enable_thinking"],
             "prompt_version": VLM_PROMPT_VERSION,
             "prompt_hash": prompt_hash,
             "token_usage": per_call_usage,
@@ -234,7 +229,8 @@ def run_vlm_review(workspace_dir, s, branch, budget, sampling_strategy, accept_c
         "strategy": sampling_strategy, "review_artifact": vlm_review_path.name,
         "model": cfg["model"], "base_url": cfg["base_url"],
         "temperature": 0.1, "seed": None, "max_tokens": cfg["max_tokens"],
-        "thinking_mode": "server_default",
+        "thinking_mode": "non_thinking",
+        "chat_template_kwargs": dict(cfg["chat_template_kwargs"]),
         "prompt_version": VLM_PROMPT_VERSION,
         "prompt_hash": prompt_hash,
         "token_usage": usage,

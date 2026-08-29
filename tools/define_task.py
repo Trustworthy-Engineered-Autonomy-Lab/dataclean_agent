@@ -15,6 +15,7 @@ from .utils import (
 )
 from .policies import default_pipeline_for, validate_pipeline
 from .decision_policy import DECISION_FIELDS, validate_fixed_policy
+from .detector_contract import DETECTOR_ARCHITECTURE, score_contract
 
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _PAIRED_BUDGET_FIELDS = (
@@ -96,7 +97,11 @@ class DefineTask(Tool):
             "seeds": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Number of seeds/runs, defaults to 1."
+                "maximum": 1,
+                "description": (
+                    "One task represents one seed/run. Multi-seed orchestration is not "
+                    "implicit; create a separate task ID for each seed."
+                )
             },
             "budget": {
                 "type": "integer",
@@ -134,7 +139,10 @@ class DefineTask(Tool):
             "transition_policy": {
                 "type": "string",
                 "enum": ["clean_only", "deploy_collect_merge"],
-                "description": "Default cross-round data transition; the adaptive agent may justify changing it unless locked by the experiment.",
+                "description": (
+                    "Default cross-round data transition. Normal tasks default to "
+                    "deploy_collect_merge; clean_only remains available for isolated cleaning studies."
+                ),
             },
             "dataset_subset": {
                 "type": "object",
@@ -147,7 +155,10 @@ class DefineTask(Tool):
             "evaluation_visibility": {
                 "type": "string",
                 "enum": ["online_feedback", "heldout_only"],
-                "description": "Whether deployment CTE is visible to the Agent or retained only for final evaluation."
+                "description": (
+                    "Whether deployment CTE is visible to the Agent or retained only for final "
+                    "evaluation. Defaults to online_feedback."
+                )
             },
             "paired_with": {
                 "type": "string",
@@ -160,7 +171,7 @@ class DefineTask(Tool):
     def run(self, task_id, description="", independent_variable="", variants=None,
             baseline="", metrics=None, seeds=1, budget=None, depends_on="", hypothesis="",
             constraints=None, pipeline=None, vlm=None, execution_mode="adaptive_agent",
-            fixed_policy=None, experimental_controls=None, transition_policy="clean_only",
+            fixed_policy=None, experimental_controls=None, transition_policy=None,
             dataset_subset=None, evaluation_visibility=None,
             paired_with="", workspace_dir=None, **_):
         if not _TASK_ID_RE.match(task_id):
@@ -195,17 +206,38 @@ class DefineTask(Tool):
             if budget is None:
                 budget = int(paired_state.get("vlm_budget_per_round", 500))
             if evaluation_visibility is None:
-                evaluation_visibility = paired_state.get("evaluation_visibility", "heldout_only")
+                evaluation_visibility = paired_state.get("evaluation_visibility", "online_feedback")
+
+        if transition_policy is None and isinstance(pipeline, dict):
+            transition_policy = pipeline.get("transition")
+        if transition_policy is None and paired_state is not None:
+            transition_policy = paired_state.get(
+                "default_transition_policy",
+                paired_state.get("transition_policy", "deploy_collect_merge"),
+            )
+        if (
+            transition_policy is None
+            and execution_mode == "fixed_baseline"
+            and isinstance(fixed_policy, dict)
+        ):
+            transition_policy = (fixed_policy.get("transition") or {}).get(
+                "transition_policy"
+            )
+        if transition_policy is None:
+            transition_policy = "deploy_collect_merge"
 
         if evaluation_visibility is None:
-            evaluation_visibility = "heldout_only"
+            evaluation_visibility = "online_feedback"
 
         if execution_mode not in ("adaptive_agent", "fixed_baseline"):
             raise ValueError("execution_mode must be adaptive_agent or fixed_baseline")
         if evaluation_visibility not in ("online_feedback", "heldout_only"):
             raise ValueError("evaluation_visibility must be online_feedback or heldout_only")
-        if not isinstance(seeds, int) or isinstance(seeds, bool) or seeds < 1:
-            raise ValueError("seeds must be >= 1")
+        if not isinstance(seeds, int) or isinstance(seeds, bool) or seeds != 1:
+            raise ValueError(
+                "One task represents exactly one seed/run. Create separate task IDs "
+                "for additional seeds so each run has an independent state and audit log."
+            )
         if budget is not None and (
             not isinstance(budget, int) or isinstance(budget, bool) or budget < 0
         ):
@@ -237,6 +269,15 @@ class DefineTask(Tool):
                 raise ValueError(f"Unknown experimental control decisions: {unknown_controls}")
             if not all(isinstance(v, dict) for v in experimental_controls.values()):
                 raise ValueError("Each experimental control must be an object")
+            detector_control = experimental_controls.get("detector") or {}
+            score_control = experimental_controls.get("score") or {}
+            partition_control = experimental_controls.get("partition") or {}
+            if "steer_lambda" in detector_control:
+                raise ValueError("IROS2026 detector controls no longer include steer_lambda")
+            if "alpha" in score_control or score_control.get("method", "pcc") != "pcc":
+                raise ValueError("IROS2026 score controls must use method=pcc, without alpha")
+            if any(key.startswith("gray_upper") for key in partition_control):
+                raise ValueError("PCC partition controls use gray_lower_threshold, not gray_upper_*")
         if dataset_subset is not None and not isinstance(dataset_subset, dict):
             raise ValueError("dataset_subset must be an object")
         if isinstance(vlm, dict):
@@ -322,17 +363,21 @@ class DefineTask(Tool):
                     "Paired tasks must use identical hard budgets; mismatched: "
                     + ", ".join(mismatched)
                 )
-            if evaluation_visibility != paired_state.get("evaluation_visibility", "heldout_only"):
+            if evaluation_visibility != paired_state.get("evaluation_visibility", "online_feedback"):
                 raise ValueError("Paired tasks must use identical evaluation_visibility")
             requested_vlm_budget = int(budget) if budget is not None else 500
             if requested_vlm_budget != int(paired_state.get("vlm_budget_per_round", 500)):
                 raise ValueError("Paired tasks must use identical per-round VLM budget")
 
+        # In adaptive mode, an omitted pipeline means no tactical policy has
+        # been preregistered. The Agent receives the capability graph separately
+        # and chooses legal actions from observations and the conversation.
         eff_pipeline = default_pipeline_for()
         if isinstance(pipeline, dict):
             eff_pipeline.update({k: v for k, v in pipeline.items() if v is not None})
         if execution_mode == "fixed_baseline":
             implied = {
+                "score": "pcc",
                 "train_detector": fixed_policy["detector"]["strategy"],
                 "resolve": fixed_policy["resolve"]["resolution_policy"],
                 "transition": fixed_policy["transition"]["transition_policy"],
@@ -345,7 +390,7 @@ class DefineTask(Tool):
                 if conflicts:
                     raise ValueError(f"pipeline conflicts with fixed_policy at stages: {conflicts}")
             eff_pipeline.update(implied)
-        eff_pipeline["transition"] = transition_policy
+            eff_pipeline["transition"] = transition_policy
         ok, errs = validate_pipeline(eff_pipeline)
         if not ok:
             raise ValueError("Pipeline validation failed: " + "; ".join(errs))
@@ -363,6 +408,8 @@ class DefineTask(Tool):
             "hypothesis": hypothesis,
             "constraints": eff,
             "pipeline": eff_pipeline,
+            "detector_architecture": DETECTOR_ARCHITECTURE,
+            "score_contract": score_contract(),
             "execution_mode": execution_mode,
             "fixed_policy": fixed_policy or {},
             "experimental_controls": experimental_controls or {},

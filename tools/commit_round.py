@@ -111,6 +111,7 @@ class CommitRound(Tool):
                 collection_records.extend(artifact["records"])
                 collection_parents.append({
                     "collection_id": collection_id,
+                    "anonymous_source": artifact["anonymous_source"],
                     "deployment_run_id": artifact.get("deployment_run_id"),
                     "fingerprint": artifact.get("fingerprint"),
                     "count": artifact.get("count"),
@@ -169,6 +170,7 @@ class CommitRound(Tool):
             "input_dataset": state.get("round_input_dataset"),
             "input_fingerprint": state.get("round_input_fingerprint"),
             "clean_dataset": clean_ref,
+            "scores_artifact": state.get("latest_scores"),
             "clean_count": len(clean_records),
             "transition_policy": transition_policy,
             "collection_ids": selected_collection_ids,
@@ -183,7 +185,7 @@ class CommitRound(Tool):
                 for key, value in (state.get("latest_observation") or {}).items()
                 if key in {
                     "train_detector", "score_and_fit", "partition", "resolve",
-                    "train_controller", "eval_controller", "transfer_eval_results",
+                    "train_controller", "eval_controller", "transfer_eval_results", "evaluate",
                 }
             },
         }
@@ -222,7 +224,8 @@ class CommitRound(Tool):
         state["latest_scores"] = None
         state["score_round"] = None
         state["score_detector_id"] = None
-        state["score_alpha"] = None
+        state.pop("score_alpha", None)
+        state["score_contract"] = None
         state["latest_partition"] = None
         state["latest_observation"] = {}
         state["vlm_budget_current_round"] = next_round

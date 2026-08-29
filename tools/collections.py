@@ -12,7 +12,7 @@ import re
 import time
 from pathlib import Path
 
-from .dataset import _dataset_fingerprint
+from .dataset import _dataset_fingerprint, _anonymize_source_name
 from .io import _task_dir, _write_json_atomic
 
 
@@ -93,7 +93,7 @@ def _read_collection_records(workspace_dir, collection_id, source_dir,
             continue
         records.append({
             "id": f"{collection_id}:{index}",
-            "source": collection_id,
+            "source": _anonymize_source_name(collection_id),
             "image": str(image.relative_to(workspace)),
             "steering": max(-1.0, min(1.0, steering)),
         })
@@ -116,15 +116,24 @@ def write_collection_manifest(workspace_dir, branch, collection_id,
         raise ValueError("Collection payload must remain inside its task-local collection directory")
     path = directory / MANIFEST
     if path.exists():
-        existing = json.loads(path.read_text(encoding="utf-8"))
+        existing = load_collection(workspace_dir, branch, collection_id)
         if existing.get("deployment_run_id") != deployment_run_id:
             raise ValueError("Collection ID already belongs to a different deployment run")
         return existing
+    alias = _anonymize_source_name(collection_id)
+    # Never silently merge independent batches, even in the unlikely event of
+    # a short-hash collision. Repeat imports of this batch return above.
+    for other_path in directory.parent.glob(f"*/{MANIFEST}"):
+        other = json.loads(other_path.read_text(encoding="utf-8"))
+        other_id = other.get("collection_id")
+        if other_id and other_id != collection_id and _anonymize_source_name(other_id) == alias:
+            raise ValueError("Anonymous collection source collision; use a new collection ID")
     records = _read_collection_records(workspace_dir, collection_id, source_dir)
     payload = {
         "schema_version": 1,
         "role": "deployment_collection",
         "collection_id": collection_id,
+        "anonymous_source": alias,
         "deployment_run_id": deployment_run_id,
         "task_id": branch,
         "round": int(round_index),
@@ -150,4 +159,14 @@ def load_collection(workspace_dir, branch, collection_id):
     records = payload.get("records")
     if not isinstance(records, list) or payload.get("fingerprint") != _dataset_fingerprint(records):
         raise ValueError(f"Collection manifest is corrupt: {collection_id}")
+    alias = _anonymize_source_name(collection_id)
+    if payload.get("anonymous_source", alias) != alias or any(
+        _anonymize_source_name(record["source"]) != alias for record in records
+    ):
+        raise ValueError(f"Collection source identity mismatch: {collection_id}")
+    if payload.get("count") != len(records) or len({r["id"] for r in records}) != len(records):
+        raise ValueError(f"Collection count/IDs are invalid: {collection_id}")
+    # Legacy manifests retain their on-disk records/fingerprints; only the
+    # returned view gains the same alias used by current reports and state.
+    payload["anonymous_source"] = alias
     return payload

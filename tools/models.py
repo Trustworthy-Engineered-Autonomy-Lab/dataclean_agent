@@ -8,8 +8,8 @@ TRANSFORM_224_224 = transforms.Compose([
     transforms.ToTensor(),
 ])
 
-_ENCODED_HEIGHT = (IMAGE_HEIGHT + 15) // 16
-_ENCODED_WIDTH = (IMAGE_WIDTH + 15) // 16
+_ENCODED_HEIGHT = IMAGE_HEIGHT // 8
+_ENCODED_WIDTH = IMAGE_WIDTH // 8
 
 class ImageEncoder(nn.Sequential):
     def __init__(self):
@@ -17,49 +17,52 @@ class ImageEncoder(nn.Sequential):
             nn.Conv2d(3, 16, 3, stride=2, padding=1), nn.BatchNorm2d(16), nn.ReLU(True),
             nn.Conv2d(16, 32, 3, stride=2, padding=1), nn.BatchNorm2d(32), nn.ReLU(True),
             nn.Conv2d(32, 64, 3, stride=2, padding=1), nn.BatchNorm2d(64), nn.ReLU(True),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1), nn.BatchNorm2d(128), nn.ReLU(True),
             nn.Flatten(),
-            nn.Linear(128 * _ENCODED_HEIGHT * _ENCODED_WIDTH, 256), nn.ReLU(True)
+            nn.Linear(64 * _ENCODED_HEIGHT * _ENCODED_WIDTH, 256), nn.ReLU(True)
         )
 
 class ImageDecoder(nn.Sequential):
     def __init__(self, input_dim=256):
         super().__init__(
-            nn.Linear(input_dim, 128 * _ENCODED_HEIGHT * _ENCODED_WIDTH), nn.ReLU(True),
-            nn.Unflatten(1, (128, _ENCODED_HEIGHT, _ENCODED_WIDTH)),
-            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1), nn.BatchNorm2d(64), nn.ReLU(True),
+            nn.Linear(input_dim, 64 * _ENCODED_HEIGHT * _ENCODED_WIDTH), nn.ReLU(True),
+            nn.Unflatten(1, (64, _ENCODED_HEIGHT, _ENCODED_WIDTH)),
             nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1), nn.BatchNorm2d(32), nn.ReLU(True),
             nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1), nn.BatchNorm2d(16), nn.ReLU(True),
             nn.ConvTranspose2d(16, 3, 3, stride=2, padding=1, output_padding=1), nn.Sigmoid()
         )
 
-class UnifiedCAE(nn.Module):
-    """Image-only representation with two independent self-supervised signals.
-
-    Steering is a prediction target, never an encoder input. Feeding the target
-    into the latent (the legacy design) allowed the steering head to copy the
-    answer and weakened image/action-consistency anomaly detection.
-    """
+class SteerEncoder(nn.Sequential):
     def __init__(self):
-        super(UnifiedCAE, self).__init__()
-        self.encoder = ImageEncoder()
-        self.decoder = ImageDecoder(input_dim=256)
-        self.steer_head = nn.Sequential(
-            nn.Linear(256, 128), nn.ReLU(True),
-            nn.Linear(128, 64), nn.ReLU(True),
-            nn.Linear(64, 1)
+        super().__init__(
+            nn.Linear(1, 64), nn.ReLU(True),
+            nn.Linear(64, 128), nn.ReLU(True),
+            nn.Linear(128, 256), nn.ReLU(True),
         )
 
-    def forward(self, x):
+
+class IROS2026CAE(nn.Module):
+    """IROS2026 action-conditioned CAE, adapted to RGB 224x224.
+
+    Three image convolution stages; the image and steering embeddings are
+    averaged before reconstruction. There is no steering prediction head/loss.
+    """
+    def __init__(self):
+        super().__init__()
+        self.encoder = ImageEncoder()
+        self.steer_encoder = SteerEncoder()
+        self.decoder = ImageDecoder(input_dim=256)
+
+    def forward(self, x, steering):
         if x.dim() != 4 or tuple(x.shape[1:]) != (3, IMAGE_HEIGHT, IMAGE_WIDTH):
             raise ValueError(
-                f"UnifiedCAE expects NCHW RGB tensors shaped "
+                f"IROS2026CAE expects NCHW RGB tensors shaped "
                 f"[N,3,{IMAGE_HEIGHT},{IMAGE_WIDTH}]"
             )
-        latent = self.encoder(x)
+        if tuple(steering.shape) != (x.shape[0], 1):
+            raise ValueError("IROS2026CAE expects steering shaped [N, 1]")
+        latent = (self.encoder(x) + self.steer_encoder(steering)) / 2.0
         x_recon = self.decoder(latent)
-        steer_pred = self.steer_head(latent)
-        return x_recon, latent, steer_pred
+        return x_recon, latent
 
 class ControllerCNN(nn.Module):
     """
@@ -128,10 +131,11 @@ class ControllerDeploymentWrapper(nn.Module):
 
 def calculate_pcc_tensor(img, output):
     b = img.shape[0]
-    x = img.view(b, -1)
-    y = output.view(b, -1)
+    x = img.reshape(b, -1)
+    y = output.reshape(b, -1)
     x_m = x - x.mean(dim=1, keepdim=True)
     y_m = y - y.mean(dim=1, keepdim=True)
     num = (x_m * y_m).sum(dim=1)
-    den = torch.sqrt((x_m**2).sum(dim=1) * (y_m**2).sum(dim=1) + 1e-8)
+    # Match eval_epoch in the supplied IROS source: epsilon AFTER norm product.
+    den = torch.norm(x_m, p=2, dim=1) * torch.norm(y_m, p=2, dim=1) + 1e-8
     return (num / den).clamp(-1.0, 1.0)

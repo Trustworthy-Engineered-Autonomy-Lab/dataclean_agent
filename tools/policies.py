@@ -1,9 +1,9 @@
 POLICIES = {
     "score": {
-        "robust_composite": "Within-round robust composite of image reconstruction and image-to-steering prediction errors",
+        "pcc": "IROS2026 raw reconstruction PCC, higher = normal; no composite weighting or normalization",
     },
     "partition": {
-        "data_driven": "Unsupervised two-step partition: analyze candidates, then choose keep/gray lower threshold and optional gray/discard upper threshold.",
+        "data_driven": "Analyze PCC candidates; keep >= threshold, gray below threshold, optionally discard below gray_lower_threshold.",
     },
     "resolve": {
         "vlm": "Gray zone reviewed by local VLM, keep + accepted samples form clean dataset",
@@ -11,7 +11,7 @@ POLICIES = {
         "inspect_only": "Gray zone reviewed by local VLM without outputting clean dataset (audit branch)",
     },
     "evaluate": {
-        "openloop": "Open-loop metrics calculation/visualization (AUC/P/R/F1/purity on full/keep/cleandata)",
+        "data_report": "Plot all D_t PCC scores and report anonymous source retention from final C_t; no labels or quality metrics",
     },
     "train_detector": {
         "retrain": "Retrain detector every round",
@@ -36,7 +36,18 @@ POLICIES = {
     },
 }
 
-DEFAULT_PIPELINE = {
+# Adaptive tasks must not inherit tactical choices merely because the actions
+# exist.  A populated stage->policy mapping made the model treat "retrain",
+# "vlm", and "clean_only" as an implicit fixed script.  Explicit pipeline
+# preferences remain supported, while a normal adaptive task starts empty and
+# reasons over the capability graph below.
+DEFAULT_PIPELINE = {}
+
+# State files created before the adaptive capability-graph migration contain
+# this automatically generated mapping even though the user never selected it.
+# Keep it recognizable so Agent context can avoid treating legacy defaults as
+# an explicit preregistration.
+LEGACY_ADAPTIVE_DEFAULT_PIPELINE = {
     "train_detector": "retrain",
     "score": "robust_composite",
     "partition": "data_driven",
@@ -49,6 +60,30 @@ DEFAULT_PIPELINE = {
     "transition": "clean_only",
 }
 
+CAPABILITY_GRAPH = {
+    "kind": "adaptive_experiment_graph",
+    "dependencies": {
+        "train_detector": ["round_input"],
+        "score_and_fit": ["detector_ready"],
+        "partition": ["scored"],
+        "resolve": ["partitioned"],
+        "evaluate": ["resolved_clean_dataset", "matching_round_scores"],
+        "train_controller": ["resolved_clean_dataset"],
+        "deploy_controller": ["trained_controller"],
+        "eval_controller": ["deployed_controller"],
+        "transfer_eval_results": ["completed_deployment_run"],
+        "commit_round": ["resolved_clean_dataset"],
+    },
+    "round_outputs": {
+        "clean_only": "D_(t+1)=C_t",
+        "deploy_collect_merge": "D_(t+1)=C_t union N_t",
+    },
+    "notes": [
+        "Dependencies define legal action order, not a mandatory checklist.",
+        "Controller training, deployment, collection, and round advancement are driven by the conversational goal.",
+    ],
+}
+
 STAGE_ORDER = [
     "train_detector", "score", "partition", "resolve", "evaluate", "train_controller",
     "deploy_controller", "eval_controller", "transfer_eval_results", "transition",
@@ -59,7 +94,7 @@ STAGE_LABEL = {
     "score": "Scoring",
     "partition": "Partitioning",
     "resolve": "Resolve Clean Dataset",
-    "evaluate": "Open-Loop Evaluation",
+    "evaluate": "PCC and Source Retention Report",
     "train_controller": "Controller Training",
     "deploy_controller": "Physical Controller Deployment",
     "eval_controller": "Physical Car Evaluation and Collection",
@@ -75,37 +110,9 @@ TASK_TYPE_LABEL = {
     "agent_vs_baseline": "Agent vs Baseline",
     "custom": "Custom Experiment",
 }
-TASK_TYPE_DESC = {
-    "threshold_ablation": "Partition threshold policy ablation",
-    "detector_ablation": "Detector retrain/reuse and lambda ablation",
-    "agent_vs_baseline": "Agent adaptive vs fixed rules baseline comparison",
-    "custom": "Custom experiment",
-}
-
 LEDGER_FIELDS = {
     "partition": [("threshold", "th"), ("keep", "keep"), ("gray", "gray"), ("discard", "discard")],
-    "evaluate": [("target", "eval"), ("threshold", "th"), ("n_samples", "n")],
 }
-
-
-def stage_label(stage):
-    return STAGE_LABEL.get(stage, stage)
-
-
-def policy_description(stage, policy):
-    return (POLICIES.get(stage) or {}).get(policy, policy)
-
-
-def task_type_label(tt):
-    return TASK_TYPE_LABEL.get(tt, tt)
-
-
-def describe_task_types():
-    return ", ".join(f"{t} ({TASK_TYPE_DESC.get(t, '')})" for t in TASK_TYPES)
-
-
-def describe_default_pipeline():
-    return " -> ".join(STAGE_ORDER)
 
 
 def policies_payload():
@@ -114,16 +121,10 @@ def policies_payload():
         "stage_label": STAGE_LABEL,
         "policies": POLICIES,
         "default_pipeline": DEFAULT_PIPELINE,
+        "capability_graph": CAPABILITY_GRAPH,
         "task_types": TASK_TYPES,
         "task_type_label": TASK_TYPE_LABEL,
     }
-
-
-def stage_policy(stage, pipeline=None):
-    pipeline = pipeline or {}
-    if stage in pipeline:
-        return pipeline[stage]
-    return DEFAULT_PIPELINE.get(stage)
 
 
 def validate_pipeline(pipeline):
@@ -140,3 +141,22 @@ def validate_pipeline(pipeline):
 
 def default_pipeline_for(task_type=None):
     return dict(DEFAULT_PIPELINE)
+
+
+def capability_graph_payload():
+    return {
+        "kind": CAPABILITY_GRAPH["kind"],
+        "dependencies": {
+            key: list(value)
+            for key, value in CAPABILITY_GRAPH["dependencies"].items()
+        },
+        "round_outputs": dict(CAPABILITY_GRAPH["round_outputs"]),
+        "notes": list(CAPABILITY_GRAPH["notes"]),
+    }
+
+
+def agent_pipeline_projection(pipeline, execution_mode="adaptive_agent"):
+    pipeline = dict(pipeline or {})
+    if execution_mode == "adaptive_agent" and pipeline == LEGACY_ADAPTIVE_DEFAULT_PIPELINE:
+        return {}
+    return pipeline

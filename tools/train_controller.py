@@ -33,33 +33,42 @@ class TrainController(Tool):
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 100,
-                "description": "Number of training epochs (default 5)."
+                "description": "Explicitly selected number of training epochs."
             },
             "batch_size": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 512,
-                "description": "Training batch size (default 64)."
+                "description": "Explicitly selected training batch size."
             },
             "lr": {
                 "type": "number",
                 "minimum": 1e-6,
                 "maximum": 0.01,
-                "description": "Learning rate for Adam optimizer (default 0.001)."
+                "description": "Explicitly selected Adam learning rate."
             },
             "weight_decay": {
                 "type": "number", "minimum": 0.0, "maximum": 0.1,
-                "description": "Adam weight decay (default 1e-5).",
+                "description": "Explicitly selected Adam weight decay.",
             },
-            "validation_fraction": {"type": "number", "minimum": 0.05, "maximum": 0.4},
-            "seed": {"type": "integer"},
-            "rationale": {"type": "string"},
+            "validation_fraction": {
+                "type": "number", "minimum": 0.05, "maximum": 0.4,
+                "description": "Explicitly selected validation fraction.",
+            },
+            "seed": {"type": "integer", "description": "Training and split RNG seed."},
+            "rationale": {
+                "type": "string",
+                "description": "Observation-based reason for the controller training configuration.",
+            },
         },
-        "required": []
+        "required": [
+            "epochs", "batch_size", "lr", "weight_decay",
+            "validation_fraction", "seed", "rationale",
+        ]
     }
     
-    def run(self, clean_dataset_id=None, epochs=5, batch_size=64, lr=0.001,
-            validation_fraction=0.2, seed=0, rationale="", weight_decay=1e-5,
+    def run(self, clean_dataset_id=None, epochs=None, batch_size=None, lr=None,
+            validation_fraction=None, seed=None, rationale="", weight_decay=None,
             branch="main", workspace_dir=None, cancel_event=None, **_):
         started = time.monotonic()
         s = _load(workspace_dir, branch=branch) or {}
@@ -72,12 +81,21 @@ class TrainController(Tool):
             "seed": seed,
         }
         effective, decision_source = effective_action(s, "controller", proposed)
-        epochs = int(effective.get("epochs", epochs))
-        batch_size = int(effective.get("batch_size", batch_size))
-        lr = float(effective.get("lr", lr))
-        weight_decay = float(effective.get("weight_decay", weight_decay))
-        validation_fraction = float(effective.get("validation_fraction", validation_fraction))
-        seed = int(effective.get("seed", seed))
+        required_fields = (
+            "epochs", "batch_size", "lr", "weight_decay",
+            "validation_fraction", "seed",
+        )
+        missing = [name for name in required_fields if effective.get(name) is None]
+        if missing:
+            raise ValueError(
+                "train_controller requires explicit decisions for: " + ", ".join(missing)
+            )
+        epochs = int(effective["epochs"])
+        batch_size = int(effective["batch_size"])
+        lr = float(effective["lr"])
+        weight_decay = float(effective["weight_decay"])
+        validation_fraction = float(effective["validation_fraction"])
+        seed = int(effective["seed"])
         if not 1 <= epochs <= 100:
             raise ValueError("Controller epochs must be in [1, 100]")
         if not 1 <= batch_size <= 512:
@@ -140,7 +158,7 @@ class TrainController(Tool):
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
         dataset = DrivingDataset(workspace_dir, data)
-        bs = int(batch_size) if batch_size else 64
+        bs = int(batch_size)
         val_n = max(1, int(round(len(dataset) * validation_fraction)))
         train_n = len(dataset) - val_n
         if train_n < 2:
@@ -156,7 +174,7 @@ class TrainController(Tool):
         optimizer = torch.optim.Adam(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
         criterion = nn.MSELoss()
 
-        num_epochs = int(epochs) if epochs else 5
+        num_epochs = int(epochs)
         final_loss = 0.0
         best_val_loss = float("inf")
         best_state = None
@@ -223,6 +241,10 @@ class TrainController(Tool):
                     tmp_onnx,
                     export_params=True,
                     opset_version=17,
+                    # Keep the lab's TorchScript/opset-17 export path explicit.
+                    # Newer torch defaults to Dynamo, which adds onnxscript and
+                    # may emit external weights for this temporary filename.
+                    dynamo=False,
                     do_constant_folding=True,
                     input_names=["image"],
                     output_names=["steer"]

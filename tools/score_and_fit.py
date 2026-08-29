@@ -1,20 +1,24 @@
 import json
 import time
-from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from .base import Tool
 from .decision_policy import effective_action, record_decision
-from .models import UnifiedCAE, calculate_pcc_tensor
+from .models import IROS2026CAE, calculate_pcc_tensor
+from .detector_contract import DETECTOR_ARCHITECTURE, SCORE_CONTRACT_VERSION, score_contract
 from .image_contract import (
     IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH, INPUT_CONTRACT_VERSION,
 )
-from .utils import _load, _save, _artifact, _records, _quantiles, _combined_score, record_observation, DrivingDataset, print_progress, _dataset_config, _write_json_atomic
+from .utils import _load, _save, _artifact, _records, _quantiles, record_observation, DrivingDataset, print_progress, _write_json_atomic
 
 class ScoreAndFit(Tool):
     name = "score_and_fit"
-    description = "Evaluate dataset using UnifiedCAE detector and calculate anomaly score distribution (mean and std)."
+    description = (
+        "Score D_t with the IROS2026 image+steering CAE. The only decision score is raw "
+        "reconstruction PCC in [-1,1], HIGHER = more normal. No alpha, steering error, "
+        "within-round normalization or smoothing. Reconstruction MSE is diagnostic only."
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -22,30 +26,25 @@ class ScoreAndFit(Tool):
                 "type": "string",
                 "description": "Optional specific detector ID to score. Defaults to active_detector."
             },
-            "alpha": {
-                "type": "number",
-                "description": "Optional weighting alpha between reconstruction PCC and steering prediction error (range 0.0-1.0, default 0.5)."
-            },
             "rationale": {
                 "type": "string",
-                "description": "Reason for adaptive score-component weighting."
+                "description": "Optional reason for scoring/re-scoring the current data with this detector."
             },
         },
         "required": []
     }
 
-    def run(self, detector_id=None, alpha=0.5, rationale="", branch="main", workspace_dir=None, cancel_event=None, **_):
+    def run(self, detector_id=None, rationale="", branch="main", workspace_dir=None, cancel_event=None, **_):
         started = time.monotonic()
         s = _load(workspace_dir, branch=branch)
         if s.get("round_status") not in ("detector_ready", "scored"):
             raise ValueError("Scoring requires a detector-ready round and cannot run after partition")
-        proposed = {"alpha": float(alpha) if alpha is not None else 0.5}
+        if _.get("alpha") is not None:
+            raise ValueError("alpha was removed: IROS2026 uses raw PCC only; omit alpha")
+        proposed = {"method": "pcc"}
         effective, decision_source = effective_action(s, "score", proposed)
-        alpha = float(effective.get("alpha", proposed["alpha"]))
-        if not 0.0 <= alpha <= 1.0:
-            raise ValueError("alpha must be in [0, 1]")
-        if decision_source.startswith("agent") and not rationale.strip():
-            raise ValueError("Adaptive score decisions require an observation-based rationale")
+        if effective.get("alpha") is not None or effective.get("method") != "pcc":
+            raise ValueError("Score policy is incompatible: use method=pcc without alpha")
         if decision_source == "fixed_policy" and not rationale.strip():
             rationale = "Preregistered fixed baseline score policy"
         target_detector = detector_id or s.get("active_detector")
@@ -54,12 +53,13 @@ class ScoreAndFit(Tool):
         detector_meta = s.get("detector") or {}
         if (
             detector_meta.get("id") != target_detector
+            or detector_meta.get("architecture") != DETECTOR_ARCHITECTURE
             or detector_meta.get("input_shape") != [IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH]
             or detector_meta.get("input_contract_version") != INPUT_CONTRACT_VERSION
         ):
             raise ValueError(
-                "Detector checkpoint is not compatible with the current 224x224 input "
-                "contract. Retrain the detector before scoring."
+                "Detector checkpoint is not the IROS2026 224x224 action-conditioned CAE. "
+                "Retrain the detector before scoring."
             )
 
         ckpt_path = _artifact(workspace_dir, f"{target_detector}.pt", branch=branch)
@@ -68,14 +68,14 @@ class ScoreAndFit(Tool):
 
         records = _records(workspace_dir, branch=branch)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = UnifiedCAE().to(device)
+        model = IROS2026CAE().to(device)
         model.load_state_dict(torch.load(ckpt_path, map_location=device))
         model.eval()
 
         dataset = DrivingDataset(workspace_dir, records)
         dataloader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4 if torch.cuda.is_available() else 0)
 
-        pcc_list, steer_err_list = [], []
+        pcc_list, mse_list = [], []
         total_steps = len(dataloader)
         step = 0
         last_pct = -10.0
@@ -84,11 +84,11 @@ class ScoreAndFit(Tool):
                 if cancel_event is not None and cancel_event.is_set():
                     raise InterruptedError("Scoring cancelled")
                 imgs, steers = imgs.to(device), steers.to(device)
-                recon, _, steer_pred = model(imgs)
+                recon, _ = model(imgs, steers)
                 pcc_batch = calculate_pcc_tensor(imgs, recon)
-                err_batch = (steer_pred - steers).abs().squeeze(1)
+                mse_batch = (recon - imgs).square().mean(dim=(1, 2, 3))
                 pcc_list.extend(pcc_batch.cpu().numpy().tolist())
-                steer_err_list.extend(err_batch.cpu().numpy().tolist())
+                mse_list.extend(mse_batch.cpu().numpy().tolist())
 
                 step += 1
                 pct = step / total_steps * 100
@@ -96,26 +96,37 @@ class ScoreAndFit(Tool):
                     print_progress(f"[Score & Fit] Scoring [{target_detector}] {step}/{total_steps} ({pct:3.0f}%)")
                     last_pct = pct
 
-        pcc, err = np.array(pcc_list), np.array(steer_err_list)
-        if not np.all(np.isfinite(pcc)) or not np.all(np.isfinite(err)):
-            raise RuntimeError("Detector produced non-finite reconstruction or steering scores")
-        alpha_val = float(alpha) if alpha is not None else 0.5
-        scores = _combined_score(pcc, err, alpha=alpha_val)
-        if not np.all(np.isfinite(scores)):
-            raise RuntimeError("Composite anomaly scoring produced non-finite values")
+        pcc, mse = np.array(pcc_list), np.array(mse_list)
+        if not len(pcc) or not np.all(np.isfinite(pcc)) or not np.all(np.isfinite(mse)):
+            raise RuntimeError("Detector produced empty or non-finite reconstruction scores")
+        scores = pcc
 
         s_mean, s_std = float(np.mean(scores)), float(np.std(scores))
 
         path = _artifact(workspace_dir, f"scores_r{s.get('round', 0)}_{target_detector}.json", branch=branch)
-        scored = [{**r, "pcc": round(float(pcc[i]), 6), "steer_error": round(float(err[i]), 6), "anomaly_score": round(float(scores[i]), 6)} for i, r in enumerate(records)]
+        scored = []
+        for i, record in enumerate(records):
+            # C_t can carry previous-round diagnostic fields. Never propagate
+            # legacy scores alongside a new score definition.
+            clean_record = {k: v for k, v in record.items() if k not in (
+                "anomaly_score", "steer_error", "score_alpha",
+                "pcc", "normality_score", "reconstruction_mse", "score_contract_version",
+            )}
+            scored.append({
+                **clean_record, "pcc": float(pcc[i]), "normality_score": float(pcc[i]),
+                "reconstruction_mse": float(mse[i]),
+                "score_contract_version": SCORE_CONTRACT_VERSION,
+            })
         _write_json_atomic(path, scored)
 
         obs = {
             "detector_id_scored": target_detector,
-            "alpha": alpha_val,
+            "architecture": DETECTOR_ARCHITECTURE,
+            "score_contract": score_contract(),
             "raw_count": len(records),
             "pcc": _quantiles(pcc),
-            "anomaly_score": _quantiles(scores),
+            "normality_score": _quantiles(scores),
+            "reconstruction_mse": _quantiles(mse),
             "stats": {"mean": round(s_mean, 5), "std": round(s_std, 5)},
             "high_abs_steering_count": int(np.sum(np.abs([r['steering'] for r in records]) >= .35)),
             "score_artifact": path.name,
@@ -128,7 +139,7 @@ class ScoreAndFit(Tool):
             s,
             "score",
             proposed,
-            {"alpha": alpha},
+            effective,
             rationale,
             decision_source,
             observation={"detector_id": target_detector, "round_input_count": len(records)},
@@ -136,7 +147,8 @@ class ScoreAndFit(Tool):
         s["latest_scores"] = str(path)
         s["score_round"] = s.get("round", 0)
         s["score_detector_id"] = target_detector
-        s["score_alpha"] = alpha_val
+        s.pop("score_alpha", None)
+        s["score_contract"] = score_contract()
         s["round_status"] = "scored"
         record_observation(
             s, "score_and_fit", obs, workspace_dir=workspace_dir,
