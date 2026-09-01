@@ -1,9 +1,9 @@
 POLICIES = {
     "score": {
-        "pcc": "IROS2026 raw reconstruction PCC, higher = normal; no composite weighting or normalization",
+        "pcc": "IROS2026 raw reconstruction PCC as weak reconstruction-agreement evidence; no class-label interpretation, composite weighting, or normalization",
     },
     "partition": {
-        "data_driven": "Analyze PCC candidates; keep >= threshold, gray below threshold, optionally discard below gray_lower_threshold.",
+        "data_driven": "Analyze PCC candidates from mean-k*std, K-means (K=2), and KDE using the partition threshold prior; use a single keep/gray boundary and a fixed 30% maximum plausible anomaly ratio.",
     },
     "resolve": {
         "vlm": "Gray zone reviewed by local VLM, keep + accepted samples form clean dataset",
@@ -111,7 +111,7 @@ TASK_TYPE_LABEL = {
     "custom": "Custom Experiment",
 }
 LEDGER_FIELDS = {
-    "partition": [("threshold", "th"), ("keep", "keep"), ("gray", "gray"), ("discard", "discard")],
+    "partition": [("threshold", "th"), ("keep", "keep"), ("gray", "gray")],
 }
 
 

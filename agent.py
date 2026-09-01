@@ -1,10 +1,13 @@
 import json
 import hashlib
+import base64
+import mimetypes
 import threading
 import queue as _queue
 import time
 import uuid
 import re
+from pathlib import Path
 try:
     from openai import OpenAI
 except ImportError:
@@ -18,7 +21,7 @@ from tools.agent_protocol import (
     record_turn_completed,
 )
 
-AGENT_PROMPT_VERSION = "conversation-driven-runtime-v6"
+AGENT_PROMPT_VERSION = "conversation-driven-runtime-v7-partition-visual-prior"
 _NON_OPERATIONAL_ARGUMENTS = {"rationale", "request_basis"}
 _PROTOCOL_MUTATION_TOOLS = {
     "propose_experiment_episode", "assess_experiment_episode",
@@ -141,6 +144,32 @@ def _tool_result_retryable(result):
     return bool(payload.get("retryable", False)) if isinstance(payload, dict) else False
 
 
+def _visible_image_refs(result):
+    """Extract explicitly marked image artifacts from a normalized tool result."""
+    try:
+        payload = json.loads(result) if isinstance(result, str) else result
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    refs = payload.get("artifact_refs") or data.get("agent_visible_artifacts") or []
+    output = []
+    for ref in refs:
+        if isinstance(ref, str):
+            name, purpose, kind = ref, "Auxiliary experiment image", "image"
+        elif isinstance(ref, dict):
+            name = ref.get("name")
+            purpose = ref.get("purpose") or "Auxiliary experiment image"
+            kind = ref.get("kind", "image")
+        else:
+            continue
+        if kind != "image" or not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+            continue
+        output.append({"name": name, "purpose": str(purpose)})
+    return output
+
+
 def _tool_result_event(name, result):
     ok, status, error = _classify_tool_result(result)
     return {"type": "tool_result", "name": name, "result": result,
@@ -198,6 +227,7 @@ class Turn:
         self.paused=False; self.pause_reason=None
         self.usage={"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}
         self.max_model_steps=max_model_steps; self.max_tool_calls=max_tool_calls
+        self.pending_visuals = []
         self.started_monotonic = time.monotonic()
         system_prompt = next((m.get("content", "") for m in history if m.get("role") == "system"), "")
         self.agent_metadata = {
@@ -216,6 +246,40 @@ class Turn:
         # occurred. Values keep bounded retry metadata for genuinely transient
         # errors; changed experiment state invalidates the record lazily.
         self.failed_operational_calls = {}
+
+    def _queue_visuals(self, result):
+        refs = _visible_image_refs(result)
+        if not refs:
+            return
+        known = {item["name"] for item in self.pending_visuals}
+        for item in refs:
+            if item["name"] not in known:
+                self.pending_visuals.append(item)
+                known.add(item["name"])
+
+    def _visual_message(self):
+        if not self.pending_visuals:
+            return None
+        workspace_dir = self.context.get("workspace_dir")
+        branch = self.context.get("branch") or "main"
+        if not workspace_dir or not re.fullmatch(r"[A-Za-z0-9_-]+", str(branch)):
+            self.pending_visuals = []
+            return None
+        artifact_dir = (Path(workspace_dir) / ".dataclean" / "tasks" / str(branch) / "artifacts").resolve()
+        parts = [{
+            "type": "text",
+            "text": "Agent-visible auxiliary experiment images. Use them only as visual evidence together with the authoritative structured tool result.",
+        }]
+        for item in self.pending_visuals:
+            path = (artifact_dir / item["name"]).resolve()
+            if path.parent != artifact_dir or not path.is_file():
+                continue
+            mime = mimetypes.guess_type(path.name)[0] or "image/png"
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            parts.append({"type": "text", "text": f"{item['name']}: {item['purpose']}"})
+            parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}})
+        self.pending_visuals = []
+        return {"role": "user", "content": parts} if len(parts) > 1 else None
 
     def _execution_fingerprint(self):
         workspace_dir = self.context.get("workspace_dir")
@@ -299,6 +363,9 @@ class Turn:
             content=""; calls={}
             try:
                 raw_messages = self.history + self.messages
+                visual_message = self._visual_message()
+                if visual_message:
+                    raw_messages = raw_messages + [visual_message]
                 sanitized_messages = []
                 for idx, m in enumerate(raw_messages):
                     if idx > 0 and m.get("role") == "system":
@@ -601,6 +668,7 @@ class Turn:
                     # Record after protocol persistence: the retry comparison must
                     # use the complete post-attempt execution context.
                     self._remember_failed_call(operational_signature, result)
+                self._queue_visuals(result)
                 yield _tool_result_event(call["name"], result)
                 self.messages.append({"role":"tool","content":result,"tool_call_id":call["id"]})
             if self.stop.is_set():

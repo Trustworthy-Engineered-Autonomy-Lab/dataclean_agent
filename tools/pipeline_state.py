@@ -18,8 +18,66 @@ _ALWAYS_HIDDEN_METRICS = {
 }
 _CTE_METRICS = {
     "cte_mean", "real_cte_mean", "real_cte_std", "real_cte_rmse",
-    "real_cte_signed_mean", "best_cte", "last_deployed_cte",
+    "real_cte_signed_mean", "cte_samples", "best_cte", "last_deployed_cte",
 }
+_CTE_FEEDBACK_FIELDS = (
+    "real_cte_mean", "real_cte_std", "real_cte_rmse",
+    "real_cte_signed_mean", "cte_samples",
+)
+
+
+def _cte_feedback(state):
+    """Return the latest online CTE summary and its round-to-round deltas.
+
+    CTE is a delayed, round-level outcome used to guide the next cleaning
+    decision.  It is never converted into a sample label or merged into PCC.
+    """
+    observations = []
+    latest = (state.get("latest_observation") or {}).get("transfer_eval_results")
+    if isinstance(latest, dict):
+        observations.append((int(state.get("round", 0)), latest))
+    for completed in reversed(state.get("round_history") or []):
+        if not isinstance(completed, dict):
+            continue
+        payload = (completed.get("observations") or {}).get("transfer_eval_results")
+        if isinstance(payload, dict):
+            observations.append((int(completed.get("round", 0)), payload))
+
+    normalized = []
+    seen = set()
+    for round_index, payload in observations:
+        if payload.get("evaluation_visibility") != "online_feedback":
+            continue
+        metrics = {key: payload.get(key) for key in _CTE_FEEDBACK_FIELDS
+                   if payload.get(key) is not None}
+        if "real_cte_mean" not in metrics or round_index in seen:
+            continue
+        seen.add(round_index)
+        normalized.append({"round": round_index, **metrics})
+    normalized.sort(key=lambda item: item["round"])
+    if not normalized:
+        return {"available": False, "reason": "no transferred CTE statistics yet"}
+
+    current = normalized[-1]
+    feedback = {
+        "available": True,
+        "round": current["round"],
+        "cte": current,
+        "history": normalized,
+    }
+    if len(normalized) >= 2:
+        previous = normalized[-2]
+        feedback["previous_round"] = previous
+        feedback["delta_vs_previous"] = {
+            key: round(float(current[key]) - float(previous[key]), 6)
+            for key in ("real_cte_mean", "real_cte_std", "real_cte_rmse", "real_cte_signed_mean")
+            if key in current and key in previous
+        }
+    feedback["interpretation"] = (
+        "Round-level downstream feedback only; higher absolute mean/RMSE indicates worse tracking, "
+        "but does not identify which samples are anomalous."
+    )
+    return feedback
 
 
 def _agent_visible_projection(value, *, hide_cte):
@@ -66,7 +124,9 @@ class PipelineState(Tool):
             }, ensure_ascii=False)
 
         spec = _load_task_spec(workspace_dir, branch=branch)
-        hide_cte = s.get("evaluation_visibility", "online_feedback") == "heldout_only"
+        # Physical evaluation is always online feedback in this experiment;
+        # there is no hidden-CTE task mode.
+        hide_cte = False
         active_samples = s.get("round_input_count")
         active_comp = None
         round_input_error = None
@@ -138,6 +198,7 @@ class PipelineState(Tool):
             "available_detector_architecture": DETECTOR_ARCHITECTURE,
             "available_score_contract": score_contract(),
             "active_score_contract": s.get("score_contract"),
+            "downstream_feedback": _cte_feedback(s),
             "active_controller": {
                 "id": (s.get("active_controller") or {}).get("id"),
                 "trained_on_round": (s.get("active_controller") or {}).get("round"),
@@ -186,9 +247,9 @@ class PipelineState(Tool):
                 }
                 for run in (s.get("deployment_runs") or [])[-5:]
             ],
-            "evaluation_visibility": s.get("evaluation_visibility", "online_feedback"),
+            "evaluation_visibility": "online_feedback",
             "vlm_budget": {
-                "per_round": s.get("vlm_budget_per_round"),
+                "per_round": min(200, int(200 if s.get("vlm_budget_per_round") is None else s.get("vlm_budget_per_round"))),
                 "used_this_round": s.get("vlm_budget_used_this_round", 0),
                 "used_total": s.get("vlm_calls_total", 0),
             },

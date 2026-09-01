@@ -257,7 +257,7 @@ def _nonempty_strings(value, field, minimum=1, maximum=None):
 def action_requires_episode(tool_name, args=None):
     if tool_name not in CONSEQUENTIAL_TOOLS:
         return False
-    if tool_name == "partition" and (args or {}).get("threshold") is None:
+    if tool_name == "partition" and (args or {}).get("strategy") is None:
         return False
     return True
 

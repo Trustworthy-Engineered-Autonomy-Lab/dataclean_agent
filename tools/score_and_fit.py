@@ -10,14 +10,16 @@ from .detector_contract import DETECTOR_ARCHITECTURE, SCORE_CONTRACT_VERSION, sc
 from .image_contract import (
     IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH, INPUT_CONTRACT_VERSION,
 )
+from .pcc_plot import plot_score_distribution
 from .utils import _load, _save, _artifact, _records, _quantiles, record_observation, DrivingDataset, print_progress, _write_json_atomic
 
 class ScoreAndFit(Tool):
     name = "score_and_fit"
     description = (
         "Score D_t with the IROS2026 image+steering CAE. The only decision score is raw "
-        "reconstruction PCC in [-1,1], HIGHER = more normal. No alpha, steering error, "
-        "within-round normalization or smoothing. Reconstruction MSE is diagnostic only."
+        "reconstruction PCC in [-1,1], measuring reconstruction agreement rather than a class "
+        "probability. No alpha, steering error, within-round normalization or smoothing. "
+        "Reconstruction MSE is diagnostic only."
     )
     parameters = {
         "type": "object",
@@ -119,6 +121,22 @@ class ScoreAndFit(Tool):
             })
         _write_json_atomic(path, scored)
 
+        # Auxiliary observation for partition analysis.  This uses the full
+        # raw PCC vector before any split, source grouping, or label-based
+        # report is involved.
+        plot_path = _artifact(
+            workspace_dir, f"pcc_score_distribution_r{s.get('round', 0)}.png", branch=branch
+        )
+        plot_status = "succeeded"
+        plot_error = None
+        try:
+            plot_score_distribution(pcc, plot_path, s.get("round", 0))
+        except Exception as exc:
+            # A diagnostic image must never turn successful scoring into a
+            # failed experiment action.
+            plot_status = "failed"
+            plot_error = f"{type(exc).__name__}: {exc}"
+
         obs = {
             "detector_id_scored": target_detector,
             "architecture": DETECTOR_ARCHITECTURE,
@@ -130,6 +148,14 @@ class ScoreAndFit(Tool):
             "stats": {"mean": round(s_mean, 5), "std": round(s_std, 5)},
             "high_abs_steering_count": int(np.sum(np.abs([r['steering'] for r in records]) >= .35)),
             "score_artifact": path.name,
+            "pcc_plot_artifact": plot_path.name if plot_status == "succeeded" else None,
+            "pcc_plot_status": plot_status,
+            "pcc_plot_error": plot_error,
+            "agent_visible_artifacts": ([{
+                "name": plot_path.name,
+                "kind": "image",
+                "purpose": "Complete raw PCC distribution before partition",
+            }] if plot_status == "succeeded" else []),
             "input_shape": [IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH],
             "input_contract_version": INPUT_CONTRACT_VERSION,
             "device": str(device),
