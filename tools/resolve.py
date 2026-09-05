@@ -19,6 +19,7 @@ from .vlm_review import run_vlm_review
 
 
 _RESOLUTION_POLICIES = tuple(POLICIES["resolve"])
+DEFAULT_VLM_SAMPLING_STRATEGY = "information_gain"
 
 
 class Resolve(Tool):
@@ -27,19 +28,22 @@ class Resolve(Tool):
         "Resolve the current partition into immutable C_t. auto_keep keeps only the detector keep region; "
         "vlm adds gray samples explicitly accepted by the reviewer; inspect_only audits gray without producing C_t. "
         "Unreviewed or failed VLM samples are quarantined, never mislabeled as VLM rejects. "
-        "For vlm/inspect_only, provide budget, sampling_strategy and accept_confidence; auto_keep needs none of these."
+        "For vlm/inspect_only, provide a call budget no greater than the fixed 200-call per-round cap "
+        "and accept_confidence; sampling_strategy defaults to information_gain and may be overridden "
+        "explicitly. auto_keep needs none of these."
     )
     parameters = {
         "type": "object",
         "properties": {
             "resolution_policy": {"type": "string", "enum": list(_RESOLUTION_POLICIES)},
             "budget": {
-                "type": "integer", "minimum": 1,
-                "description": "Explicit VLM call budget; required for vlm/inspect_only.",
+                "type": "integer", "minimum": 1, "maximum": 200,
+                "description": "VLM calls for this review (1-200); the task-level per-round cap is fixed at 200.",
             },
             "sampling_strategy": {
                 "type": "string",
                 "enum": ["pollution_defense", "rare_behavior_recovery", "information_gain", "verification"],
+                "description": "Gray-zone review ordering; omitted values default to information_gain.",
             },
             "accept_confidence": {"type": "string", "enum": ["high", "medium", "low"]},
             "rationale": {
@@ -56,7 +60,7 @@ class Resolve(Tool):
         self,
         resolution_policy=None,
         budget=None,
-        sampling_strategy=None,
+        sampling_strategy=DEFAULT_VLM_SAMPLING_STRATEGY,
         accept_confidence=None,
         rationale="",
         branch="main",
@@ -99,6 +103,8 @@ class Resolve(Tool):
             accept_confidence = effective["accept_confidence"]
             if budget < 1:
                 raise ValueError("budget must be >= 1")
+            if budget > 200:
+                raise ValueError("budget must be <= 200 (fixed per-round VLM cap)")
             if sampling_strategy not in (
                 "pollution_defense", "rare_behavior_recovery", "information_gain", "verification"
             ):
@@ -128,9 +134,6 @@ class Resolve(Tool):
         score_map = {r["id"]: r for r in scored}
         keep = [score_map[i] for i in partition.get("keep_ids", []) if i in score_map]
         gray = [score_map[i] for i in partition.get("gray_ids", []) if i in score_map]
-        detector_discard_ids = {
-            i for i in partition.get("discard_ids", []) if i in score_map
-        }
 
         review = {
             "accepted": [], "rejected": [], "unresolved": [], "call_failed": [],
@@ -170,7 +173,6 @@ class Resolve(Tool):
             "score_contract": score_contract(),
             "keep_count": len(keep),
             "gray_count": len(gray),
-            "detector_discard_count": len(detector_discard_ids),
             "vlm_selected": review["selected"],
             "vlm_api_calls": review["api_calls"],
             "vlm_successful_responses": review.get("successful_responses", 0),
@@ -234,12 +236,15 @@ class Resolve(Tool):
             metadata={
                 "resolution_policy": resolution_policy,
                 "partition_threshold": partition.get("threshold"),
-                "gray_lower_threshold": partition.get("gray_lower_threshold"),
                 "score_contract": score_contract(),
                 "scores_artifact": Path(scores_ref).name,
                 "round_input_fingerprint": state.get("round_input_fingerprint"),
                 "decision_source": source,
                 "rationale": rationale,
+                # This provenance is intentionally scoped to the current C_t.
+                # commit_round does not carry it into D_(t+1), so a sample must
+                # be accepted by VLM again in a later round to receive weight 2.
+                "vlm_accepted_ids": sorted(accepted_ids) if resolution_policy == "vlm" else [],
             },
         )
         quarantine_path = _artifact(workspace_dir, f"quarantine_r{round_index}.json", branch=branch)
@@ -251,7 +256,6 @@ class Resolve(Tool):
                 "unresolved_ids": sorted(unresolved_ids),
                 "call_failed_ids": sorted(call_failed_ids),
                 "vlm_rejected_ids": sorted(rejected_ids),
-                "detector_discard_ids": sorted(detector_discard_ids),
                 "policy_discarded_gray_ids": sorted({r["id"] for r in gray}) if resolution_policy == "auto_keep" else [],
             },
         )

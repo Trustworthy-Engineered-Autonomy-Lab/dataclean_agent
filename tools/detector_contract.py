@@ -12,10 +12,14 @@ def score_contract():
         "field": "normality_score",
         "formula": "PCC(image, reconstruction)",
         "range": [-1.0, 1.0],
-        "higher_is": "normal",
-        "keep_rule": "normality_score >= threshold",
-        "gray_rule": "normality_score < threshold; optionally >= gray_lower_threshold",
-        "discard_rule": "normality_score < gray_lower_threshold (only if specified)",
+        "higher_is": "reconstruction_agreement",
+        "interpretation": (
+            "Weak unsupervised evidence only; higher PCC means closer image/reconstruction agreement, "
+            "not a normal-class probability or ground-truth label."
+        ),
+        "keep_rule": "normality_score >= threshold (operational candidate rule only)",
+        "gray_rule": "normality_score < threshold (not an anomaly label)",
+        "discard_rule": "no detector discard zone; low scores are sent to gray for review",
         "calibrated_probability": False,
     }
 
@@ -48,7 +52,7 @@ def require_partition_contract(partition):
 
 
 def review_rank(record, strategy, threshold):
-    """Lower PCC is riskier; distance-based sampling is orientation invariant."""
+    """Use PCC to order review candidates, without treating it as a label."""
     score = float(record["normality_score"])
     distance = abs(score - threshold)
     if strategy == "pollution_defense":

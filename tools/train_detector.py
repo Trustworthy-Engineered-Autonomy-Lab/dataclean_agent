@@ -16,13 +16,25 @@ from .image_contract import (
 )
 from .utils import _load, _save, _artifact, _records, DrivingDataset, _ensure_constraints, print_progress, record_observation
 
+
+def _default_reference_latents(sample_count):
+    """Return the default frozen-reference latent count for the IROS2026 CAE.
+
+    Large datasets use a fixed 500-reference budget; smaller datasets use ten
+    percent of the round input.  The boundary value 5000 follows the small
+    dataset branch (floor(5000 / 10) = 500).
+    """
+    n = int(sample_count)
+    return 500 if n > 5000 else max(1, n // 10)
+
+
 class TrainDetector(Tool):
     name = "train_detector"
     description = (
         "Train or reuse the IROS2026 image+steering CAE on current D_t. "
         "Loss is reconstruction MSE + lambda * nearest frozen-reference latent MSE, "
         "active from epoch 1. No steering-prediction head or warm-up. "
-        "Reference default: max(1, floor(N/50)); batch default: 256, as in the supplied code. "
+        "Reference default: 500 latents when N>5000, otherwise max(1, floor(N/10)); batch default: 256. "
         "For retraining, provide learning_rate, epochs, lambda_value and seed; reuse does not require them."
     )
     parameters = {
@@ -51,7 +63,7 @@ class TrainDetector(Tool):
             "n_reference_latents": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Optional reference count override. Omit for the IROS2026 floor(N/50) rule (at least 1)."
+                "description": "Optional reference count override. Omit for the default: 500 when N>5000, otherwise max(1, floor(N/10))."
             },
             "seed": {"type": "integer", "description": "Training RNG seed."},
             "rationale": {
@@ -136,7 +148,7 @@ class TrainDetector(Tool):
             actual_lr = 5e-4
             actual_epochs = 10
             actual_lambda = 1.0
-            actual_n_reference_latents = max(1, len(recs) // 50)
+            actual_n_reference_latents = _default_reference_latents(len(recs))
             batch_size = 256
             seed = 0
             epoch_msg = "Round 0 detector hyper-params locked (constraint lock_round0_detector)"
@@ -155,7 +167,7 @@ class TrainDetector(Tool):
             actual_lambda = float(effective["lambda_value"])
             reference_count = effective.get("n_reference_latents")
             actual_n_reference_latents = (
-                max(1, len(recs) // 50) if reference_count is None else int(reference_count)
+                _default_reference_latents(len(recs)) if reference_count is None else int(reference_count)
             )
             batch_size = 256 if effective.get("batch_size") is None else int(effective["batch_size"])
             seed = int(effective["seed"])
@@ -235,8 +247,9 @@ class TrainDetector(Tool):
             optimizer = torch.optim.Adam(model.parameters(), lr=actual_lr)
             mse = nn.MSELoss()
 
-            # Match IROS2026: sample 2% of D_t, encode with the INITIAL model
-            # in eval mode, then freeze these latents for the entire training.
+            # Sample the configured default/reference count from D_t, encode
+            # with the INITIAL model in eval mode, then freeze these latents
+            # for the entire training.
             # Batch the reference pass so it does not load all RGB images on GPU.
             ref_indices = np.random.RandomState(seed).choice(
                 len(recs), size=actual_n_reference_latents, replace=False,
