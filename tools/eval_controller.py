@@ -44,13 +44,13 @@ class EvalController(Tool):
             },
             "n_images": {
                 "type": "integer",
-                "description": "Number of images to collect before the evaluation run exits (default 500)."
+                "description": "Number of images to collect before the evaluation run exits (default 1000)."
             }
         },
         "required": []
     }
     
-    def run(self, controller_path=None, n_images=500, branch="main", workspace_dir=None,
+    def run(self, controller_path=None, n_images=1000, branch="main", workspace_dir=None,
             cancel_event=None, **_):
         s = _load(workspace_dir, branch=branch)
         _ensure_constraints(s, branch)

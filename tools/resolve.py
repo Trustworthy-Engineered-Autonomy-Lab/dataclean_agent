@@ -241,6 +241,10 @@ class Resolve(Tool):
                 "round_input_fingerprint": state.get("round_input_fingerprint"),
                 "decision_source": source,
                 "rationale": rationale,
+                # This provenance is intentionally scoped to the current C_t.
+                # commit_round does not carry it into D_(t+1), so a sample must
+                # be accepted by VLM again in a later round to receive weight 2.
+                "vlm_accepted_ids": sorted(accepted_ids) if resolution_policy == "vlm" else [],
             },
         )
         quarantine_path = _artifact(workspace_dir, f"quarantine_r{round_index}.json", branch=branch)

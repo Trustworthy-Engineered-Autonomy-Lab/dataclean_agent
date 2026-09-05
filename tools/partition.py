@@ -15,7 +15,7 @@ MEAN_STD_K_VALUES = tuple(round(i / 10, 1) for i in range(21))
 MEAN_STD_PLOT_K_VALUES = (0.5, 0.7, 0.9, 1.0, 1.1, 1.3, 1.5)
 KDE_BANDWIDTH_SCALES = (0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00)
 KMEANS_RANDOM_STATE = 0
-ANOMALY_UB_PERCENT = 30.0
+ANOMALY_UB_PERCENT = 20.0
 
 
 # This is intentionally scoped to partition arbitration.  It is not part of
@@ -44,30 +44,33 @@ Do NOT be conservative to protect normal samples; the recovery stage handles tha
    - tau_kde = {T_KDE} -> removes {DEL_KDE}% of data (or unavailable when no stable valley exists)
    - tau_meanstd = {T_MEANSTD} (k={K_VALUE}) -> removes {DEL_MEANSTD}% of data
    - PCC range: [{PCC_MIN}, {PCC_MAX}], mean={PCC_MEAN}, std={PCC_STD}
-   - max plausible anomaly ratio (prior upper bound): 30%
+   - max plausible anomaly ratio (prior upper bound): 20%
 
 ## Decision rule (MUST follow, in order)
 Step 1 - Read the BC gate:
    - If BC >= 0.555 (BIMODAL): PREFER tau_kmeans (K=2). The two centroids give a stable split of the two modes.
-   - If BC < 0.555 (UNIMODAL): PREFER tau_meanstd (mu - k*sigma). With no clear valley, the parametric tail cut is more reliable.
+   - If BC < 0.555 (UNIMODAL), or the BC value is unavailable: do NOT choose a statistical strategy. Directly estimate the plausible anomaly ratio from the current PCC statistics, the PCC scatter plot, and previous-round VLM aggregate feedback when available. This estimate is a belief about the current round, not a ground-truth label or a fixed normal-rate assumption.
 Step 2 - Sanity-adjust the preferred tau using the image and context:
-   - Confirm the preferred tau lands at or just above the visible separation between the low-PCC tail and the main score band. Use the KDE density panel and structured candidates as authoritative; the scatter panel alone does not show density.
-   - Given the aggressive policy, if two candidates are close, pick the one that removes MORE (larger tau), UNLESS it would exceed the 30% max plausible anomaly ratio by a large margin.
-   - Never choose a tau whose deletion ratio grossly exceeds 30%.
-Step 3 - tau_kde is a cross-check, not the default: only override the BC-preferred choice if a stable KDE valley is available, clearly deeper/cleaner, AND better placed on the gap. If KDE reports no stable valley, do not invent a KDE threshold or substitute a median/quantile threshold.
+   - For the BIMODAL branch, confirm the preferred tau lands at or just above the visible separation between the low-PCC tail and the main score band. Use the KDE density panel and structured candidates as authoritative; the scatter panel alone does not show density.
+   - For the UNIMODAL/BC-unavailable branch, choose an estimated anomaly ratio from 0% to the 20% hard upper bound, then use the corresponding empirical lower-tail PCC quantile as the threshold. Do not select mean-std, K-Means, or KDE in this branch.
+   - Given the aggressive policy, if two candidates are close, pick the one that removes MORE (larger tau), UNLESS it would exceed the 20% max plausible anomaly ratio by a large margin.
+   - Never choose a tau whose deletion ratio grossly exceeds 20%.
+Step 3 - tau_kde is a cross-check, not the default in the BIMODAL branch: only override the BC-preferred choice if a stable KDE valley is available, clearly deeper/cleaner, AND better placed on the gap. If KDE reports no stable valley, do not invent a KDE threshold. KDE is not a choice in the UNIMODAL/BC-unavailable branch.
 
 ## Reasoning steps (think in this order)
 1. Report BC and whether the gate says bimodal or unimodal.
 2. Describe the visible PCC separation and low-score tail from the plot, and report whether the KDE density agrees with the BC gate.
-3. Identify which candidate tau sits best on the gap.
-4. Check whether the aggressive high-recall policy justifies a larger tau without exceeding 30% deletion.
-5. Give the final tau and its method.
+3. For the BIMODAL branch, identify which candidate tau sits best on the gap. For the UNIMODAL/BC-unavailable branch, estimate the plausible anomaly-ratio range using current evidence and previous-round VLM feedback when available.
+4. Check whether the aggressive high-recall policy justifies a larger tau without exceeding 20% deletion.
+5. Give the final tau. In the UNIMODAL/BC-unavailable branch, report that it came from direct anomaly-ratio estimation and an empirical lower-tail quantile, not a statistical candidate strategy.
 
 ## Output - JSON ONLY, no prose, no markdown fences
 {
   "bimodal": true/false,
   "bc_value": 0.0,
-  "preferred_method": "kmeans" | "meanstd" | "kde",
+  "preferred_method": "kmeans" | "meanstd" | "kde" | "direct_ratio",
+  "estimated_anomaly_ratio_percent": 0.0,
+  "estimated_anomaly_ratio_range_percent": [0.0, 0.0],
   "chosen_tau": 0.0,
   "expected_deletion_ratio": 0.0,
   "gap_location": "<short description>",
@@ -83,12 +86,15 @@ def _prior_value(value):
     return str(value)
 
 
-def _format_partition_prior(stats, candidates, plot_name, *, mean_std_k=1.0):
+def _format_partition_prior(stats, candidates, plot_name, previous_vlm_feedback=None, *, mean_std_k=1.0):
     """Fill the senior threshold prior with current observable evidence."""
+    statistical_branch = stats.get("bimodality_gate") == "bimodal"
     mean_items = candidates.get("mean_std") or []
     mean_item = next((item for item in mean_items if item.get("k") == round(float(mean_std_k), 1)), None)
     kmeans_item = candidates.get("kmeans_reference") or {}
     kde_item = candidates.get("kde_reference") or {}
+    if not statistical_branch:
+        mean_item = kmeans_item = kde_item = {}
     prior = PARTITION_PRIOR_PROMPT
     replacements = {
         "{BC_VALUE}": _prior_value(stats.get("bimodality_coefficient")),
@@ -116,6 +122,22 @@ def _format_partition_prior(stats, candidates, plot_name, *, mean_std_k=1.0):
         + json.dumps(plot_name, ensure_ascii=False, sort_keys=True)
         + "."
     )
+    feedback = previous_vlm_feedback or {"available": False, "reason": "No previous-round VLM review is available (first round or no VLM review)."}
+    if feedback.get("available"):
+        prior += (
+            "\n\nPrevious-round VLM aggregate feedback (directional evidence only; not labels): "
+            + json.dumps(feedback, ensure_ascii=False, sort_keys=True)
+            + ". A high accepted/selected ratio supports a lower current anomaly-rate belief; "
+            "a low ratio supports a higher belief. Many unresolved or technical failures reduce confidence."
+        )
+    else:
+        prior += "\n\nPrevious-round VLM aggregate feedback: unavailable. " + str(feedback.get("reason", "No usable prior feedback."))
+    if not statistical_branch:
+        prior += (
+            "\n\nBranch constraint: the BC gate is not bimodal. Statistical candidate strategies "
+            "are diagnostic only and must not be selected. Return a direct anomaly-ratio "
+            "estimate and let the runtime convert it to an empirical lower-tail quantile."
+        )
     shape = candidates.get("shape_consistency") or {}
     if shape:
         prior += (
@@ -130,12 +152,44 @@ def _format_partition_prior(stats, candidates, plot_name, *, mean_std_k=1.0):
     return prior
 
 
+def _previous_vlm_feedback(state):
+    """Return only the previous round's aggregate VLM evidence for partitioning."""
+    current_round = int(state.get("round", 0))
+    if current_round <= 0:
+        return {"available": False, "reason": "First round has no previous VLM review."}
+    entries = [
+        entry for entry in (state.get("round_history") or [])
+        if int(entry.get("round", -1)) == current_round - 1
+    ]
+    if not entries:
+        return {"available": False, "reason": "Previous round history is unavailable."}
+    observation = (entries[-1].get("observations") or {}).get("resolve") or {}
+    selected = int(observation.get("vlm_selected", 0) or 0)
+    accepted = int(observation.get("vlm_accepted", 0) or 0)
+    unresolved = int(observation.get("vlm_unresolved", 0) or 0)
+    technical = int(observation.get("vlm_technical_failures", 0) or 0)
+    successful = int(observation.get("vlm_successful_responses", 0) or 0)
+    if selected <= 0:
+        return {"available": False, "reason": "Previous round did not provide a usable VLM-selected sample count."}
+    return {
+        "available": True,
+        "previous_round": current_round - 1,
+        "vlm_selected": selected,
+        "vlm_accepted": accepted,
+        "vlm_unresolved": unresolved,
+        "vlm_technical_failures": technical,
+        "vlm_successful_responses": successful,
+        "acceptance_rate_over_selected": round(accepted / selected, 6),
+        "usable_feedback_fraction": round(successful / selected, 6),
+    }
+
+
 class Partition(Tool):
     name = "partition"
     description = (
-        "Analyze or apply a PCC split. With no strategy, return candidates for "
-        "mean-k*std (k=0.0..2.0 step 0.1), K-means (K=2), and KDE. When applying, "
-        "provide one strategy and its hyperparameters; the tool computes the exact threshold. "
+        "Analyze or apply a PCC split. With no strategy or estimated anomaly ratio, return candidates for "
+        "mean-k*std (k=0.0..2.0 step 0.1), K-means (K=2), and KDE. When BC is below 0.555 or unavailable, "
+        "the Agent may apply a direct estimated anomaly ratio, converted to an empirical lower-tail PCC quantile. "
         "PCC is interpreted using the partition prior and the current score evidence. KDE is "
         "unavailable when no stable valley is detected; it never falls back to a median or quantile. "
         "All supported strategies use a single keep/gray boundary."
@@ -144,7 +198,11 @@ class Partition(Tool):
         "type": "object",
         "properties": {
             "strategy": {"type": "string", "enum": list(STRATEGIES),
-                         "description": "Omit to analyze candidates only; provide to apply a split."},
+                         "description": "Provide for the bimodal candidate branch; omit for analysis or direct anomaly-ratio mode."},
+            "estimated_anomaly_ratio_percent": {
+                "type": "number", "minimum": 0, "maximum": 20,
+                "description": "For BC<0.555/unavailable: estimated current-round anomaly percentage, converted to the empirical lower-tail PCC quantile; hard maximum is 20%.",
+            },
             "mean_std_k": {"type": "number", "minimum": 0, "maximum": 2,
                            "description": "For mean_std: k in [0.0, 2.0] at increments of 0.1."},
             "kmeans_k": {"type": "integer", "enum": [2],
@@ -161,7 +219,7 @@ class Partition(Tool):
                 "properties": {
                     "distribution_shape": {"type": "string"},
                     "prior_assumptions_and_uncertainty": {"type": "string"},
-                    "candidate_comparison": {"type": "string"},
+                    "candidate_comparison": {"type": "string", "description": "Required for statistical candidates; for direct anomaly-ratio mode, briefly state why no candidate strategy is being used."},
                     "main_risk": {"type": "string"},
                     "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
                 },
@@ -174,6 +232,7 @@ class Partition(Tool):
 
     def run(self, strategy=None, mean_std_k=None, kmeans_k=None,
             kmeans_boundary=None, kde_bandwidth_scale=None, kde_valley_index=None,
+            estimated_anomaly_ratio_percent=None,
             evidence=None, rationale=None, branch="main", workspace_dir=None, **kwargs):
         if "threshold" in kwargs:
             raise ValueError("Arbitrary thresholds are unsupported; choose a supported strategy")
@@ -196,14 +255,25 @@ class Partition(Tool):
         plot_artifacts, plot_errors = self._write_partition_plots(
             scores, s.get("round", 0), workspace_dir, branch, candidates
         )
-        prior = _format_partition_prior(stats, candidates, plot_artifacts)
+        previous_vlm_feedback = _previous_vlm_feedback(s)
+        prior = _format_partition_prior(
+            stats, candidates, plot_artifacts, previous_vlm_feedback
+        )
+        candidate_view = candidates
+        if stats.get("bimodality_gate") != "bimodal":
+            candidate_view = {
+                "selection_disabled": True,
+                "reason": "BC is below 0.555 or unavailable; statistical strategies are not a decision branch.",
+                "shape_consistency": candidates.get("shape_consistency"),
+            }
         agent_visible_artifacts = [
             {"name": name, "kind": "image", "purpose": f"Partition {strategy} candidate PCC scatter plot"}
             for strategy, name in plot_artifacts.items()
         ]
-        if strategy is None:
+        if strategy is None and estimated_anomaly_ratio_percent is None:
             summary = {"mode": "analyze", "score_contract": score_contract(),
-                       "n_samples": len(records), "score_stats": stats, "candidates": candidates,
+                       "n_samples": len(records), "score_stats": stats, "candidates": candidate_view,
+                       "previous_round_vlm_feedback": previous_vlm_feedback,
                        "anomaly_ratio_upper_bound_percent": ANOMALY_UB_PERCENT,
                        "partition_plots": plot_artifacts, "plot_errors": plot_errors,
                        "partition_prior_prompt": prior,
@@ -212,7 +282,10 @@ class Partition(Tool):
             _save(workspace_dir, s, branch=branch)
             return json.dumps(summary, ensure_ascii=False)
 
-        proposed = {"strategy": strategy}
+        proposed = {
+            "strategy": strategy,
+            "estimated_anomaly_ratio_percent": estimated_anomaly_ratio_percent,
+        }
         for key, value in (("mean_std_k", mean_std_k), ("kmeans_k", kmeans_k),
                            ("kmeans_boundary", kmeans_boundary),
                            ("kde_bandwidth_scale", kde_bandwidth_scale),
@@ -221,16 +294,34 @@ class Partition(Tool):
                 proposed[key] = value
         effective, source = effective_action(s, "partition", proposed)
         strategy = effective.get("strategy")
-        if strategy not in STRATEGIES:
+        estimated_ratio = effective.get("estimated_anomaly_ratio_percent")
+        threshold_mode = effective.get("threshold_mode")
+        if threshold_mode is None:
+            threshold_mode = (
+                "estimated_anomaly_ratio"
+                if strategy in (None, "") and estimated_ratio is not None
+                else "candidate"
+            )
+        direct_ratio_mode = threshold_mode == "estimated_anomaly_ratio"
+        if direct_ratio_mode:
+            if stats.get("bimodality_gate") == "bimodal":
+                raise ValueError("Direct anomaly-ratio partition is only valid when BC is below 0.555 or unavailable")
+            if strategy not in (None, ""):
+                raise ValueError("Direct anomaly-ratio partition cannot include a statistical strategy")
+            if estimated_ratio is None:
+                raise ValueError("estimated_anomaly_ratio_percent is required for direct anomaly-ratio partition")
+        elif strategy not in STRATEGIES:
             raise ValueError("Partition strategy must be mean_std, kmeans, or kde")
         if source.startswith("agent") and not str(rationale or "").strip():
             raise ValueError("Adaptive partition decisions require an observation-based rationale")
         evidence = evidence if isinstance(evidence, dict) else {}
         if source.startswith("agent"):
-            required_evidence = (
+            required_evidence = [
                 "distribution_shape", "prior_assumptions_and_uncertainty",
-                "candidate_comparison", "main_risk", "confidence",
-            )
+                "main_risk", "confidence",
+            ]
+            if not direct_ratio_mode:
+                required_evidence.append("candidate_comparison")
             missing = [key for key in required_evidence if not str(evidence.get(key) or "").strip()]
             if missing:
                 raise ValueError("Adaptive partition evidence is incomplete: " + ", ".join(missing))
@@ -238,7 +329,14 @@ class Partition(Tool):
                 raise ValueError("Adaptive partition evidence.confidence must be low, medium, or high")
         if source == "fixed_policy" and not str(rationale or "").strip():
             rationale = "Preregistered fixed partition strategy"
-        threshold, params, candidate_id = self._select_candidate(strategy, effective, candidates)
+        if direct_ratio_mode:
+            threshold, params, candidate_id = self._select_estimated_ratio(
+                scores, estimated_ratio
+            )
+            partition_method = "estimated_anomaly_ratio"
+        else:
+            threshold, params, candidate_id = self._select_candidate(strategy, effective, candidates)
+            partition_method = strategy
         keep = [r for r in records if float(r["normality_score"]) >= threshold]
         gray = [r for r in records if float(r["normality_score"]) < threshold]
         removal_percent = len(gray) / max(1, len(records)) * 100.0
@@ -247,13 +345,14 @@ class Partition(Tool):
                 f"Selected threshold removes {removal_percent:.2f}% of data, "
                 f"above the fixed {ANOMALY_UB_PERCENT:.0f}% anomaly upper bound"
             )
-        effective_params = {"strategy": strategy, **params}
+        effective_params = {"strategy": strategy, "threshold_mode": threshold_mode, **params}
         if evidence:
             effective_params["evidence"] = evidence
         s["latest_partition"] = {
             "threshold": threshold,
-            "score_contract": score_contract(), "threshold_method": strategy,
-            "strategy": strategy, "strategy_params": params, "candidate_id": candidate_id,
+            "score_contract": score_contract(), "threshold_method": partition_method,
+            "strategy": strategy, "threshold_mode": threshold_mode,
+            "strategy_params": params, "candidate_id": candidate_id,
             "evidence": evidence,
             "keep_ids": [r["id"] for r in keep], "gray_ids": [r["id"] for r in gray],
             "keep_count": len(keep), "gray_count": len(gray),
@@ -264,24 +363,30 @@ class Partition(Tool):
             s, "partition", {**proposed, "evidence": evidence}, effective_params,
             str(rationale), source,
             observation={"score_stats": stats, "candidate_id": candidate_id,
+                         "threshold_mode": threshold_mode,
+                         "previous_round_vlm_feedback": previous_vlm_feedback,
                          "candidates": candidates, "evidence": evidence},
         )
         s["round_status"] = "partitioned"
         summary = {"mode": "split", "score_contract": score_contract(), "strategy": strategy,
+                   "threshold_mode": threshold_mode,
                    "strategy_params": params, "candidate_id": candidate_id,
+                   "estimated_anomaly_ratio_percent": params.get("estimated_anomaly_ratio_percent"),
                    "threshold_applied": threshold, "keep_count": len(keep),
                    "gray_count": len(gray),
                    "removal_percent": round(removal_percent, 5),
                    "keep_ratio": round(len(keep) / max(1, len(records)), 5),
                    "gray_ratio": round(len(gray) / max(1, len(records)), 5),
-                   "score_stats": stats, "candidates": candidates, "evidence": evidence,
+                   "score_stats": stats, "candidates": candidate_view,
+                   "previous_round_vlm_feedback": previous_vlm_feedback,
+                   "evidence": evidence,
                    "anomaly_ratio_upper_bound_percent": ANOMALY_UB_PERCENT,
                    "partition_plots": plot_artifacts, "plot_errors": plot_errors,
                    "partition_prior_prompt": prior,
                    "agent_visible_artifacts": agent_visible_artifacts}
         record_observation(s, "partition", summary, workspace_dir=workspace_dir,
                            branch=branch, decision=decision_entry)
-        append_ledger(s, {"stage": "partition", "round": s.get("round"), "strategy": strategy,
+        append_ledger(s, {"stage": "partition", "round": s.get("round"), "strategy": partition_method,
                           "threshold": threshold, "keep": len(keep), "gray": len(gray)})
         _save(workspace_dir, s, branch=branch)
         return json.dumps(summary, ensure_ascii=False)
@@ -289,7 +394,7 @@ class Partition(Tool):
     def _compute_candidates(self, scores):
         candidates = {"mean_std": self._mean_std_candidates(scores),
                       "kmeans": self._kmeans_candidates(scores), "kde": self._kde_candidates(scores),
-                      "selection_note": "Apply the partition prior using the current candidates and the fixed 30% anomaly upper bound."}
+                      "selection_note": "Apply the partition prior using the current candidates and the fixed 20% anomaly upper bound."}
         kmeans = candidates["kmeans"]
         if kmeans.get("available"):
             for model in kmeans.get("models", []):
@@ -478,6 +583,30 @@ class Partition(Tool):
                                            f"valley={valley['index']}")
         return {"available": True, "bandwidth_scales": scales,
                 "stability_tolerance": round(tolerance, 6)}
+
+    def _select_estimated_ratio(self, scores, raw_ratio):
+        """Convert the Agent's direct anomaly-rate belief into a lower-tail cutoff."""
+        if isinstance(raw_ratio, bool):
+            raise ValueError("estimated_anomaly_ratio_percent must be a number")
+        try:
+            ratio = float(raw_ratio)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("estimated_anomaly_ratio_percent must be a number") from exc
+        if not np.isfinite(ratio) or ratio < 0 or ratio > ANOMALY_UB_PERCENT:
+            raise ValueError(
+                f"estimated_anomaly_ratio_percent must be in [0, {ANOMALY_UB_PERCENT:.0f}]"
+            )
+        ratio = round(ratio, 6)
+        if ratio == 0:
+            threshold = float(np.nextafter(np.min(scores), -np.inf))
+        else:
+            threshold = float(np.quantile(scores, ratio / 100.0))
+        params = {
+            "estimated_anomaly_ratio_percent": ratio,
+            "threshold_source": "empirical_lower_tail_quantile",
+        }
+        candidate_id = f"direct_ratio:p={ratio:.6f}"
+        return threshold, params, candidate_id
 
     def _select_candidate(self, strategy, params, candidates):
         if strategy == "mean_std":
