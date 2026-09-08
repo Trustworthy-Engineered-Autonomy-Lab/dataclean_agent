@@ -35,6 +35,12 @@ CONSEQUENTIAL_TOOLS = {
     "assess_stopping": "stopping",
 }
 
+# ``evaluate`` creates a report artifact but is intentionally observation-only:
+# it does not require an episode action authorization and is not counted as a
+# consequential state-changing call.  It is nevertheless useful to declare in
+# a multi-stage episode so the episode describes the complete requested flow.
+EPISODE_DECLARABLE_TOOLS = set(CONSEQUENTIAL_TOOLS) | {"evaluate"}
+
 MILESTONE_TOOLS = {"commit_round", "deploy_controller"}
 _CONTEXT_ARGUMENTS = {"branch", "workspace_dir", "cancel_event"}
 
@@ -565,8 +571,8 @@ class ProposeExperimentEpisode(Tool):
                 "items": {"type": "string", "minLength": 1},
             },
             "permitted_actions": {
-                "type": "array", "minItems": 1, "maxItems": 8,
-                "items": {"type": "string", "enum": sorted(CONSEQUENTIAL_TOOLS)},
+                "type": "array", "minItems": 1,
+                "items": {"type": "string", "enum": sorted(EPISODE_DECLARABLE_TOOLS)},
             },
             "max_action_calls": {"type": "integer", "minimum": 1, "maximum": 20},
             "decision_variables": {"type": "object"},
@@ -611,12 +617,12 @@ class ProposeExperimentEpisode(Tool):
         alternatives = _nonempty_strings(
             considered_alternatives or [], "considered_alternatives", 0, 5
         )
-        if not isinstance(permitted_actions, list) or not 1 <= len(permitted_actions) <= 8:
-            raise ValueError("permitted_actions must contain between one and eight actions")
+        if not isinstance(permitted_actions, list) or len(permitted_actions) < 1:
+            raise ValueError("permitted_actions must contain at least one action")
         permitted_actions = list(dict.fromkeys(permitted_actions))
-        unknown = [name for name in permitted_actions if name not in CONSEQUENTIAL_TOOLS]
+        unknown = [name for name in permitted_actions if name not in EPISODE_DECLARABLE_TOOLS]
         if unknown:
-            raise ValueError(f"Unknown consequential actions: {unknown}")
+            raise ValueError(f"Unknown episode actions: {unknown}")
         unavailable = []
         for name in permitted_actions:
             try:
