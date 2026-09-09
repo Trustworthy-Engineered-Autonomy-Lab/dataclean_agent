@@ -246,6 +246,16 @@ class Turn:
         # occurred. Values keep bounded retry metadata for genuinely transient
         # errors; changed experiment state invalidates the record lazily.
         self.failed_operational_calls = {}
+        # Initialize trajectory recorder
+        from tools.trajectory_recorder import get_trajectory_recorder
+        self.trajectory_recorder = get_trajectory_recorder()
+        self._trajectory_call_map = {}  # Map tool_call_id -> recorder_call_idx
+        self._trajectory_step_counter = 0  # Counter for pipeline steps
+        if self.trajectory_recorder:
+            self.trajectory_recorder.record_agent_config(
+                model=model, temperature=temperature, seed=seed,
+                prompt_version=AGENT_PROMPT_VERSION
+            )
 
     def _queue_visuals(self, result):
         refs = _visible_image_refs(result)
@@ -334,6 +344,22 @@ class Turn:
             self.agent_metadata["duration_seconds"] = round(
                 time.monotonic() - self.started_monotonic, 6
             )
+            # Finalize trajectory recording with token usage and final state
+            if self.trajectory_recorder:
+                # Record token usage
+                self.trajectory_recorder.record_token_usage(
+                    input_tokens=self.usage.get("prompt_tokens", 0),
+                    output_tokens=self.usage.get("completion_tokens", 0)
+                )
+                # Record final state
+                final_state = "completed"
+                if self.paused:
+                    final_state = "paused"
+                elif self.stopped:
+                    final_state = "aborted"
+                self.trajectory_recorder.set_final_state(final_state)
+                # Finalize
+                self.trajectory_recorder.finalize()
             record_turn_completed(
                 self.context.get("workspace_dir"),
                 self.context.get("branch"),
@@ -521,6 +547,15 @@ class Turn:
                     yield _tool_result_event(call["name"], result)
                     self.messages.append({"role":"tool","content":result,"tool_call_id":call["id"]})
                     continue
+                # Auto-record tool call to trajectory
+                if self.trajectory_recorder:
+                    self._trajectory_step_counter += 1
+                    recorder_call_idx = self.trajectory_recorder.record_tool_call(
+                        tool_name=call["name"],
+                        tool_args=args,
+                        step_index=self._trajectory_step_counter
+                    )
+                    self._trajectory_call_map[call["id"]] = recorder_call_idx
                 yield {"type":"tool_call","name":call["name"],"args":args}
                 is_state_changing = _is_state_changing_agent_call(call["name"], args)
                 if is_state_changing and state_changing_call_seen:
@@ -668,6 +703,16 @@ class Turn:
                     # Record after protocol persistence: the retry comparison must
                     # use the complete post-attempt execution context.
                     self._remember_failed_call(operational_signature, result)
+                # Auto-record tool result to trajectory
+                if self.trajectory_recorder and call["id"] in self._trajectory_call_map:
+                    recorder_call_idx = self._trajectory_call_map[call["id"]]
+                    success, status, error = _classify_tool_result(result)
+                    self.trajectory_recorder.record_tool_result(
+                        recorder_call_idx,
+                        result=json.loads(result) if isinstance(result, str) else result,
+                        success=success,
+                        error=error
+                    )
                 self._queue_visuals(result)
                 yield _tool_result_event(call["name"], result)
                 self.messages.append({"role":"tool","content":result,"tool_call_id":call["id"]})
