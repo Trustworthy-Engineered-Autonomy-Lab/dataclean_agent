@@ -18,6 +18,9 @@ from .decision_policy import DECISION_FIELDS, validate_fixed_policy
 from .detector_contract import DETECTOR_ARCHITECTURE, score_contract
 
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# VLM fairness budget is fixed per round.  Individual resolve calls may still
+# request a smaller number (for example 50), but the task-level cap is 200.
+VLM_BUDGET_PER_ROUND = 200
 _PAIRED_BUDGET_FIELDS = (
     "max_rounds", "max_vlm_calls_total", "max_detector_train_epochs_total",
     "max_controller_train_epochs_total", "max_deployments",
@@ -105,7 +108,8 @@ class DefineTask(Tool):
             },
             "budget": {
                 "type": "integer",
-                "description": "Optional VLM API-call cap per round."
+                "enum": [200],
+                "description": "Fixed VLM API-call cap per round (200). Use resolve.budget <= 200 for a smaller review call."
             },
             "depends_on": {
                 "type": "string",
@@ -154,11 +158,8 @@ class DefineTask(Tool):
             },
             "evaluation_visibility": {
                 "type": "string",
-                "enum": ["online_feedback", "heldout_only"],
-                "description": (
-                    "Whether deployment CTE is visible to the Agent or retained only for final "
-                    "evaluation. Defaults to online_feedback."
-                )
+                "enum": ["online_feedback"],
+                "description": "Deployment CTE is visible to the Agent after transfer; this is the only supported mode."
             },
             "paired_with": {
                 "type": "string",
@@ -204,9 +205,9 @@ class DefineTask(Tool):
                     inherited_constraints[key] = (paired_state.get("constraints") or {}).get(key)
             constraints = inherited_constraints
             if budget is None:
-                budget = int(paired_state.get("vlm_budget_per_round", 500))
+                budget = int(paired_state.get("vlm_budget_per_round", VLM_BUDGET_PER_ROUND))
             if evaluation_visibility is None:
-                evaluation_visibility = paired_state.get("evaluation_visibility", "online_feedback")
+                evaluation_visibility = "online_feedback"
 
         if transition_policy is None and isinstance(pipeline, dict):
             transition_policy = pipeline.get("transition")
@@ -231,8 +232,8 @@ class DefineTask(Tool):
 
         if execution_mode not in ("adaptive_agent", "fixed_baseline"):
             raise ValueError("execution_mode must be adaptive_agent or fixed_baseline")
-        if evaluation_visibility not in ("online_feedback", "heldout_only"):
-            raise ValueError("evaluation_visibility must be online_feedback or heldout_only")
+        if evaluation_visibility != "online_feedback":
+            raise ValueError("Only online_feedback is supported; deployment CTE is visible after transfer")
         if not isinstance(seeds, int) or isinstance(seeds, bool) or seeds != 1:
             raise ValueError(
                 "One task represents exactly one seed/run. Create separate task IDs "
@@ -242,6 +243,14 @@ class DefineTask(Tool):
             not isinstance(budget, int) or isinstance(budget, bool) or budget < 0
         ):
             raise ValueError("budget must be a non-negative integer")
+        if budget is not None and budget != VLM_BUDGET_PER_ROUND:
+            raise ValueError(
+                f"Task-level VLM budget is fixed at {VLM_BUDGET_PER_ROUND} per round; "
+                "use resolve.budget <= 200 to review fewer samples in a particular call"
+            )
+        # Normalize omitted/paired values so every newly created task records
+        # the same fairness cap explicitly.
+        budget = VLM_BUDGET_PER_ROUND
         if execution_mode == "fixed_baseline" and not isinstance(fixed_policy, dict):
             raise ValueError("fixed_baseline requires a fixed_policy object")
         if execution_mode == "fixed_baseline":
@@ -276,8 +285,8 @@ class DefineTask(Tool):
                 raise ValueError("IROS2026 detector controls no longer include steer_lambda")
             if "alpha" in score_control or score_control.get("method", "pcc") != "pcc":
                 raise ValueError("IROS2026 score controls must use method=pcc, without alpha")
-            if any(key.startswith("gray_upper") for key in partition_control):
-                raise ValueError("PCC partition controls use gray_lower_threshold, not gray_upper_*")
+            if "threshold" in partition_control:
+                raise ValueError("PCC partition controls must select a strategy and supported hyperparameters, not an arbitrary threshold")
         if dataset_subset is not None and not isinstance(dataset_subset, dict):
             raise ValueError("dataset_subset must be an object")
         if isinstance(vlm, dict):
@@ -363,10 +372,10 @@ class DefineTask(Tool):
                     "Paired tasks must use identical hard budgets; mismatched: "
                     + ", ".join(mismatched)
                 )
-            if evaluation_visibility != paired_state.get("evaluation_visibility", "online_feedback"):
+            if evaluation_visibility != "online_feedback":
                 raise ValueError("Paired tasks must use identical evaluation_visibility")
-            requested_vlm_budget = int(budget) if budget is not None else 500
-            if requested_vlm_budget != int(paired_state.get("vlm_budget_per_round", 500)):
+            requested_vlm_budget = int(budget)
+            if requested_vlm_budget != int(paired_state.get("vlm_budget_per_round", VLM_BUDGET_PER_ROUND)):
                 raise ValueError("Paired tasks must use identical per-round VLM budget")
 
         # In adaptive mode, an omitted pipeline means no tactical policy has
@@ -429,7 +438,7 @@ class DefineTask(Tool):
         new_state["round_history"] = []
         new_state["latest_observation"] = {}
         new_state["pending_collection_ids"] = []
-        new_state["vlm_budget_per_round"] = int(budget) if budget is not None else 500
+        new_state["vlm_budget_per_round"] = VLM_BUDGET_PER_ROUND
         new_state["constraints"] = eff
         new_state["pipeline"] = eff_pipeline
         new_state["execution_mode"] = execution_mode

@@ -19,9 +19,15 @@ from .utils import (_load, _save, _artifact, record_observation, DrivingDataset,
                     print_progress, _ensure_constraints, _task_artifact_reference,
                     _load_dataset_snapshot)
 
+VLM_ACCEPTED_SAMPLE_WEIGHT = 2.0
+
 class TrainController(Tool):
     name = "train_controller"
-    description = "Train an NVIDIA-style steering controller on the resolved current-round clean dataset C_t."
+    description = (
+        "Train an NVIDIA-style steering controller on the resolved current-round clean dataset C_t. "
+        "Samples accepted back by VLM in this round use weight 2 in the training MSE; all other "
+        "samples use weight 1. Validation remains unweighted, and the VLM weight expires at the round boundary."
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -140,6 +146,23 @@ class TrainController(Tool):
         if len(data) < 10:
             raise ValueError(f"Clean dataset contains too few samples ({len(data)} samples; minimum 10 required)")
 
+        # VLM provenance is deliberately read only from this round's C_t
+        # metadata. It is not propagated by commit_round, so the weight expires
+        # at the round boundary unless the sample is accepted again by VLM.
+        metadata = clean_payload.get("metadata") or {}
+        accepted_ids_raw = metadata.get("vlm_accepted_ids") or []
+        if not isinstance(accepted_ids_raw, list):
+            raise ValueError("clean dataset metadata.vlm_accepted_ids must be a list")
+        accepted_ids = {str(sample_id) for sample_id in accepted_ids_raw}
+        data_ids = {str(record["id"]) for record in data}
+        if not accepted_ids <= data_ids:
+            raise ValueError("clean dataset metadata.vlm_accepted_ids contains samples outside C_t")
+        sample_weights = torch.tensor(
+            [VLM_ACCEPTED_SAMPLE_WEIGHT if str(record["id"]) in accepted_ids else 1.0 for record in data],
+            dtype=torch.float32,
+        )
+        weight2_count = int(sum(str(record["id"]) in accepted_ids for record in data))
+
         used_epochs = int(s.get("controller_train_epochs_used", 0))
         epoch_cap = (s.get("constraints") or {}).get("max_controller_train_epochs_total")
         if epoch_cap is not None and used_epochs + epochs > int(epoch_cap):
@@ -165,6 +188,12 @@ class TrainController(Tool):
             raise ValueError("Not enough samples for train/validation split")
         split_gen = torch.Generator().manual_seed(seed)
         train_set, val_set = random_split(dataset, [train_n, val_n], generator=split_gen)
+        train_accepted_count = sum(
+            str(data[index]["id"]) in accepted_ids for index in train_set.indices
+        )
+        validation_accepted_count = sum(
+            str(data[index]["id"]) in accepted_ids for index in val_set.indices
+        )
         train_loader = DataLoader(train_set, batch_size=bs, shuffle=True, generator=split_gen,
                                   num_workers=2 if torch.cuda.is_available() else 0)
         val_loader = DataLoader(val_set, batch_size=bs, shuffle=False,
@@ -173,6 +202,7 @@ class TrainController(Tool):
         model = ControllerCNN().to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
         criterion = nn.MSELoss()
+        sample_weights = sample_weights.to(device)
 
         num_epochs = int(epochs)
         final_loss = 0.0
@@ -186,13 +216,15 @@ class TrainController(Tool):
                 model.train()
                 running_loss = 0.0
                 total_batches = len(train_loader)
-                for step, (imgs, steers, _) in enumerate(train_loader, 1):
+                for step, (imgs, steers, sample_indices) in enumerate(train_loader, 1):
                     if cancel_event is not None and cancel_event.is_set():
                         raise InterruptedError("Controller training cancelled")
                     imgs, steers = imgs.to(device), steers.to(device)
                     optimizer.zero_grad()
                     preds = model(imgs)
-                    loss = criterion(preds, steers)
+                    per_sample_loss = (preds - steers).pow(2).reshape(-1)
+                    batch_weights = sample_weights[sample_indices.to(device).long()]
+                    loss = (per_sample_loss * batch_weights).sum() / batch_weights.sum()
                     loss.backward()
                     optimizer.step()
                     running_loss += loss.item()
@@ -227,6 +259,14 @@ class TrainController(Tool):
 
             onnx_path = _artifact(workspace_dir, f"{cid}.onnx", branch=branch)
             tmp_onnx = onnx_path.with_suffix(onnx_path.suffix + ".tmp")
+            # The physical-car workflow expects the model weights as the
+            # standard ONNX external-data companion, ``<model>.onnx.data``.
+            # Export to a temporary graph first, then externalize all tensor
+            # initializers into the final companion name before atomically
+            # publishing the graph.  This avoids leaving a ``.tmp.data``
+            # file that no deployment step can find.
+            onnx_data_path = onnx_path.with_name(onnx_path.name + ".data")
+            onnx_data_path.unlink(missing_ok=True)
             model_cpu = ControllerCNN().cpu()
             model_cpu.load_state_dict(model.state_dict())
             model_cpu.eval()
@@ -234,6 +274,7 @@ class TrainController(Tool):
             dummy_input = torch.zeros(
                 1, IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS, dtype=torch.float32
             )
+            export_succeeded = False
             try:
                 torch.onnx.export(
                     deployment_model,
@@ -241,19 +282,43 @@ class TrainController(Tool):
                     tmp_onnx,
                     export_params=True,
                     opset_version=17,
-                    # Keep the lab's TorchScript/opset-17 export path explicit.
-                    # Newer torch defaults to Dynamo, which adds onnxscript and
-                    # may emit external weights for this temporary filename.
+                    # Keep the lab's TorchScript/opset-17 graph export path
+                    # explicit. Externalization is performed below so the
+                    # companion filename is deterministic.
                     dynamo=False,
                     do_constant_folding=True,
                     input_names=["image"],
                     output_names=["steer"]
                 )
+                onnx_model = onnx.load(str(tmp_onnx), load_external_data=False)
+                onnx.save_model(
+                    onnx_model,
+                    str(tmp_onnx),
+                    save_as_external_data=True,
+                    all_tensors_to_one_file=True,
+                    location=onnx_data_path.name,
+                    size_threshold=0,
+                )
+                if not onnx_data_path.is_file() or onnx_data_path.stat().st_size == 0:
+                    raise RuntimeError(
+                        "ONNX external-data export did not create a non-empty "
+                        f"companion file: {onnx_data_path.name}"
+                    )
+                # Loading normally resolves the companion relative to the
+                # graph and therefore verifies that the pair is usable.
                 onnx.checker.check_model(onnx.load(str(tmp_onnx)))
                 os.replace(tmp_onnx, onnx_path)
+                export_succeeded = True
             finally:
                 tmp_onnx.unlink(missing_ok=True)
-            print_progress(f"[TrainController] Successfully exported single ONNX model to {onnx_path.name}")
+                if not export_succeeded:
+                    # A failed/partial export must not leave a stale or
+                    # incomplete companion that could be paired with a graph.
+                    onnx_data_path.unlink(missing_ok=True)
+            print_progress(
+                f"[TrainController] Successfully exported ONNX model and external weights "
+                f"to {onnx_path.name} and {onnx_data_path.name}"
+            )
         finally:
             del model
             if "train_loader" in locals():
@@ -266,6 +331,13 @@ class TrainController(Tool):
         metrics = {
             "train_samples": train_n,
             "validation_samples": val_n,
+            "weighted_training": True,
+            "training_loss": "sample_weighted_mse",
+            "vlm_accepted_samples": weight2_count,
+            "vlm_accepted_sample_weight": VLM_ACCEPTED_SAMPLE_WEIGHT,
+            "vlm_accepted_samples_in_train": train_accepted_count,
+            "vlm_accepted_samples_in_validation": validation_accepted_count,
+            "weight_1_samples": len(data) - weight2_count,
             "steering_mean": round(float(steer.mean()), 5),
             "steering_std": round(float(steer.std()), 5),
             "final_train_mse": round(final_loss, 5),
@@ -276,9 +348,10 @@ class TrainController(Tool):
             "controller_epochs_used_total": s.get("controller_train_epochs_used", 0),
             "weights_pt_artifact": ckpt_path.name,
             "weights_onnx_artifact": onnx_path.name,
+            "weights_onnx_data_artifact": onnx_data_path.name,
             "onnx_input_contract": (
                 f"float32 NHWC [N,{IMAGE_HEIGHT},{IMAGE_WIDTH},{IMAGE_CHANNELS}], "
-                "pixel range [0,255]"
+                "cropped IROS frame, pixel range [0,255]"
             ),
             "onnx_input_shape": [IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS],
             "input_contract_version": INPUT_CONTRACT_VERSION,

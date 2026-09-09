@@ -103,19 +103,17 @@ def _apply_transfer_state(state, run, artifact, metrics):
     if collection_id not in pending and collection_id not in consumed:
         pending.append(collection_id)
 
-    visibility = state.get("evaluation_visibility", "online_feedback")
-    if visibility == "online_feedback":
-        state["last_deployed_cte"] = metrics["real_cte_mean"]
-        current_best = state.get("best_cte")
-        state["best_cte"] = metrics["real_cte_mean"] if current_best is None else min(
-            current_best, metrics["real_cte_mean"]
-        )
-        return visibility, metrics
-
-    heldout = state.setdefault("heldout_evaluations", [])
-    if not any(row.get("deployment_run_id") == run["deployment_run_id"] for row in heldout):
-        heldout.append({"deployment_run_id": run["deployment_run_id"], **metrics})
-    return visibility, {"cte_status": "recorded_heldout"}
+    # Physical evaluation is always an observable feedback signal.  Persist
+    # Normalize the mode so legacy task state is migrated when it next
+    # transfers a result.
+    visibility = "online_feedback"
+    state["evaluation_visibility"] = visibility
+    state["last_deployed_cte"] = metrics["real_cte_mean"]
+    current_best = state.get("best_cte")
+    state["best_cte"] = metrics["real_cte_mean"] if current_best is None else min(
+        current_best, metrics["real_cte_mean"]
+    )
+    return visibility, metrics
 
 
 class TransferEvalResults(Tool):

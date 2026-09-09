@@ -1,5 +1,10 @@
 import json
 import base64
+import hashlib
+import os
+import re
+import shutil
+import tempfile
 import time
 from io import BytesIO
 from pathlib import Path
@@ -10,8 +15,138 @@ from .utils import (
     _reset_vlm_budget_if_new_round, print_progress, _write_json_atomic, _save,
     VLM_PROMPT_VERSION, vlm_prompt_hash,
 )
+from .dataset import _anonymize_source_name, _deanonymize_source_name, _load_dataset_registry
 from .io import _task_artifact_reference
 from .detector_contract import normality_scores, require_partition_contract, review_rank
+
+
+def _ground_truth_class(source, workspace_dir):
+    """Resolve post-hoc binary truth from the configured source directory only.
+
+    This helper is intentionally used only for the user-facing post-hoc report;
+    its result is never placed in Agent observations or the canonical dataset.
+    Unmapped collection sources remain unknown rather than being guessed anomalous.
+    """
+    try:
+        registry = _load_dataset_registry(workspace_dir) or {}
+        sources = registry.get("sources") or []
+        names = {str(item.get("name")) for item in sources if item.get("name")}
+    except Exception:
+        names = set()
+        sources = []
+    raw = str(source or "")
+    real = _deanonymize_source_name(raw, sources)
+    if real == "normal" or raw == "normal" or raw == "src_01":
+        return "normal"
+    if real in names or raw in names:
+        return "anomalous"
+    return "unknown"
+
+
+def _safe_copy_name(sample_id, source, image):
+    alias = _anonymize_source_name(str(source or "unknown")) or "unknown"
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(sample_id)).strip("._") or "sample"
+    digest = hashlib.sha256(str(sample_id).encode("utf-8")).hexdigest()[:8]
+    suffix = Path(str(image)).suffix.lower() or ".jpg"
+    return f"{alias}__{safe_id}_{digest}{suffix}"
+
+
+def _posthoc_vlm_artifacts(workspace_dir, branch, round_index, reviewed, accepted):
+    """Write user-only accepted-image and label-based analysis artifacts."""
+    artifact_dir = _artifact(workspace_dir, f"vlm_accepted_r{round_index}", branch=branch)
+    if artifact_dir.exists():
+        raise FileExistsError(f"VLM accepted-image artifact already exists: {artifact_dir.name}")
+    root = artifact_dir.parent
+    staging = Path(tempfile.mkdtemp(prefix=f".{artifact_dir.name}-", dir=str(root)))
+    image_dir = staging / "images"
+    image_dir.mkdir()
+    try:
+        manifest_records = []
+        reviewed_by_id = {str(item.get("sample_id")): item for item in reviewed}
+        workspace = Path(workspace_dir).resolve()
+        for record in accepted:
+            source_path = (workspace / str(record["image"])).resolve()
+            if not source_path.is_relative_to(workspace) or not source_path.is_file():
+                raise FileNotFoundError(f"Accepted sample image is unavailable: {record.get('id')}")
+            filename = _safe_copy_name(record["id"], record.get("source"), record["image"])
+            shutil.copy2(source_path, image_dir / filename)
+            manifest_records.append({
+                "sample_id": record["id"],
+                "anonymous_source": _anonymize_source_name(str(record.get("source", ""))),
+                "copied_file": f"images/{filename}",
+                "model_label": reviewed_by_id.get(str(record["id"]), {}).get("model_label"),
+                "confidence": reviewed_by_id.get(str(record["id"]), {}).get("confidence"),
+                "accepted": True,
+            })
+        (staging / "manifest.json").write_text(json.dumps({
+            "round": int(round_index), "accepted_count": len(accepted),
+            "records": manifest_records,
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(staging, artifact_dir)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    matrix = {"TP": 0, "FN": 0, "FP": 0, "TN": 0}
+    outcome = {key: {"sent": 0, "pred_normal": 0, "pred_anomalous": 0,
+                     "unresolved": 0, "technical_failure": 0, "accepted": 0}
+               for key in ("normal", "anomalous", "unknown")}
+    for item in reviewed:
+        truth = _ground_truth_class(item.get("source"), workspace_dir)
+        row = outcome[truth]
+        row["sent"] += 1
+        technical = bool(item.get("call_failed")) or item.get("review_status") in {
+            "endpoint_failed", "input_preparation_failed", "output_truncated",
+            "empty_content", "unsupported_content_type", "invalid_schema", "malformed_json",
+        }
+        prediction = item.get("model_label")
+        if technical:
+            row["technical_failure"] += 1
+        elif prediction == "normal":
+            row["pred_normal"] += 1
+        elif prediction == "anomalous":
+            row["pred_anomalous"] += 1
+        else:
+            row["unresolved"] += 1
+        if item.get("accepted"):
+            row["accepted"] += 1
+        if truth == "normal" and prediction == "normal":
+            matrix["TP"] += 1
+        elif truth == "normal" and prediction == "anomalous":
+            matrix["FN"] += 1
+        elif truth == "anomalous" and prediction == "normal":
+            matrix["FP"] += 1
+        elif truth == "anomalous" and prediction == "anomalous":
+            matrix["TN"] += 1
+
+    report_path = _artifact(workspace_dir, f"vlm_review_r{round_index}.txt", branch=branch)
+    labeled = outcome["normal"]["sent"] + outcome["anomalous"]["sent"]
+    valid = sum(matrix.values())
+    lines = [
+        f"VLM post-hoc analysis report - round {round_index}",
+        "Ground truth: source directory 'normal' = normal; other registered source directories = anomalous.",
+        "Unmapped/collection sources = unknown and are excluded from TP/FP/FN/TN.",
+        "",
+        f"Images sent to VLM: {len(reviewed)}",
+        f"Images accepted back to C_t: {len(accepted)}",
+        f"Labeled images: {labeled}; valid binary predictions: {valid}",
+        "",
+        "Confusion Matrix (normal is the positive class; unresolved/technical failures excluded):",
+        "                         Pred normal   Pred anomalous",
+        f"Ground-truth normal          {matrix['TP']:>8}       {matrix['FN']:>8}",
+        f"Ground-truth anomalous       {matrix['FP']:>8}       {matrix['TN']:>8}",
+        "",
+        "Per-ground-truth outcome table:",
+        "class       sent  pred_normal  pred_anomalous  unresolved  technical_failure  accepted_to_C_t",
+    ]
+    for key in ("normal", "anomalous", "unknown"):
+        row = outcome[key]
+        lines.append(f"{key:<10} {row['sent']:>5} {row['pred_normal']:>12} {row['pred_anomalous']:>15} "
+                     f"{row['unresolved']:>11} {row['technical_failure']:>19} {row['accepted']:>16}")
+    lines.extend(["", f"Accepted-image artifact: {artifact_dir.name}/", "Manifest: manifest.json"])
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"accepted_images_artifact": artifact_dir.name,
+            "posthoc_report_artifact": report_path.name}
 
 
 def run_vlm_review(workspace_dir, s, branch, budget, sampling_strategy, accept_confidence,
@@ -24,7 +159,11 @@ def run_vlm_review(workspace_dir, s, branch, budget, sampling_strategy, accept_c
 
     _reset_vlm_budget_if_new_round(s)
 
-    per_round = s.get("vlm_budget_per_round", 500)
+    # Enforce the fixed cap even for state files created before this setting
+    # was introduced.  A call may still request fewer than 200 samples.
+    configured_cap = s.get("vlm_budget_per_round", 200)
+    per_round = min(200, int(200 if configured_cap is None else configured_cap))
+    s["vlm_budget_per_round"] = per_round
     remaining_budget = per_round - s.get("vlm_budget_used_this_round", 0)
     total_limit = (s.get("constraints") or {}).get("max_vlm_calls_total")
     remaining_total = None if total_limit is None else int(total_limit) - int(s.get("vlm_calls_total", 0))
@@ -208,6 +347,16 @@ def run_vlm_review(workspace_dir, s, branch, budget, sampling_strategy, accept_c
 
     vlm_review_path = _artifact(workspace_dir, f"vlm_review_r{s['round']}.json", branch=branch)
     _write_json_atomic(vlm_review_path, reviewed)
+    try:
+        posthoc_artifacts = _posthoc_vlm_artifacts(
+            workspace_dir, branch, int(s["round"]), reviewed, accepted,
+        )
+    except Exception as exc:
+        # The user-only analysis artifact must never invalidate a successful VLM
+        # decision or prevent C_t from being materialized.
+        posthoc_artifacts = {"accepted_images_artifact": None,
+                             "posthoc_report_artifact": None,
+                             "posthoc_artifact_error": f"{type(exc).__name__}: {exc}"}
 
     diagnostic_summary = {
         "selected": n, "api_calls": actual_calls,
@@ -227,6 +376,7 @@ def run_vlm_review(workspace_dir, s, branch, budget, sampling_strategy, accept_c
         "used_this_round": s["vlm_budget_used_this_round"],
         "remaining_this_round": per_round - s["vlm_budget_used_this_round"],
         "strategy": sampling_strategy, "review_artifact": vlm_review_path.name,
+        **posthoc_artifacts,
         "model": cfg["model"], "base_url": cfg["base_url"],
         "temperature": 0.1, "seed": None, "max_tokens": cfg["max_tokens"],
         "thinking_mode": "non_thinking",

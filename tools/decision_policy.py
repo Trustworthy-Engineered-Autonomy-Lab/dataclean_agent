@@ -50,25 +50,32 @@ def validate_fixed_policy(policy):
     if "steer_lambda" in detector:
         errors.append("detector.steer_lambda was removed with the old steering-prediction head")
     if policy["score"].get("method") != "pcc" or "alpha" in policy["score"]:
-        errors.append("score must preregister method=pcc without alpha (higher = normal)")
+        errors.append("score must preregister method=pcc without alpha (reconstruction agreement only)")
     partition = policy["partition"]
-    if partition.get("rule") not in ("fixed", "mean_std", "otsu", "kde_valley"):
-        errors.append("partition.rule must be fixed, mean_std, otsu, or kde_valley")
-    if partition.get("rule") == "fixed":
+    strategy = partition.get("strategy")
+    if strategy not in ("mean_std", "kmeans", "kde"):
+        errors.append("partition.strategy must be mean_std, kmeans, or kde")
+    if strategy == "mean_std":
         try:
-            float(partition["value"])
+            k = float(partition["mean_std_k"])
+            if not 0 <= k <= 2 or abs(k * 10 - round(k * 10)) > 1e-7:
+                errors.append("partition.mean_std_k must be a 0.1 grid value in [0, 2]")
         except (KeyError, TypeError, ValueError):
-            errors.append("partition.value must be numeric when rule=fixed")
-    if any(key.startswith("gray_upper") for key in partition):
-        errors.append("partition.gray_upper_* belongs to the removed anomaly-score convention")
-    lower_rule = partition.get("gray_lower_rule", "none")
-    if lower_rule not in ("none", "fixed", "mean_minus_2std", "quantile"):
-        errors.append("partition.gray_lower_rule is invalid")
-    if lower_rule == "fixed":
+            errors.append("partition.mean_std_k is required for mean_std")
+    if strategy == "kmeans":
+        if partition.get("kmeans_k") != 2:
+            errors.append("partition.kmeans_k must be 2")
+        boundary = partition.get("kmeans_boundary")
+        if boundary != "only":
+            errors.append("K=2 requires kmeans_boundary=only")
+    if strategy == "kde":
         try:
-            float(partition["gray_lower_value"])
+            scale = float(partition["kde_bandwidth_scale"])
+            if scale not in (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0):
+                errors.append("partition.kde_bandwidth_scale must be 0.50..2.00 in 0.25 steps")
+            int(partition["kde_valley_index"])
         except (KeyError, TypeError, ValueError):
-            errors.append("partition.gray_lower_value must be numeric")
+            errors.append("partition.kde_bandwidth_scale and kde_valley_index are required for kde")
     if policy["resolve"].get("resolution_policy") not in ("vlm", "auto_keep"):
         errors.append("resolve.resolution_policy is invalid")
     for field in ("resolution_policy", "budget", "sampling_strategy", "accept_confidence"):
@@ -83,6 +90,8 @@ def validate_fixed_policy(policy):
     try:
         if int(policy["resolve"].get("budget")) < 1:
             errors.append("resolve.budget must be >= 1")
+        elif int(policy["resolve"].get("budget")) > 200:
+            errors.append("resolve.budget must be <= 200 (fixed per-round VLM cap)")
     except (TypeError, ValueError):
         errors.append("resolve.budget must be an integer")
     for field in ("epochs", "batch_size", "lr", "weight_decay", "validation_fraction", "seed"):

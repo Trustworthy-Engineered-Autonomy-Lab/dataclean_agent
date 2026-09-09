@@ -131,7 +131,7 @@ class Evaluate(Tool):
             ax.set_xlim(-.5, len(ordered) - .5)
             ax.set_ylim(-1.02, 1.02)
             ax.set_xlabel("All pre-partition D_t samples, grouped by anonymous source")
-            ax.set_ylabel("PCC (higher = more normal)")
+            ax.set_ylabel("PCC reconstruction agreement (not a class label)")
             ax.set_title(f"Round {round_index}: full D_t PCC distribution (n={len(ordered)})")
             ax.grid(axis="y", alpha=.2)
             ax.legend(loc="lower left", fontsize=8)

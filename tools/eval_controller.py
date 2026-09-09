@@ -22,10 +22,13 @@ CTE_PYTHON_PATH = _remote_absolute_path(
 )
 EVAL_TIMEOUT_SECONDS = int(os.environ.get("DATACLEAN_EVAL_TIMEOUT_SECONDS", "1800"))
 CTE_STARTUP_SECONDS = float(os.environ.get("DATACLEAN_CTE_STARTUP_SECONDS", "2"))
+CAR_LAUNCH_FILE = os.environ.get("DATACLEAN_CAR_LAUNCH_FILE", "iros2026.launch").strip()
 if EVAL_TIMEOUT_SECONDS <= 0:
     raise ValueError("DATACLEAN_EVAL_TIMEOUT_SECONDS must be positive")
 if not 0 <= CTE_STARTUP_SECONDS <= 60:
     raise ValueError("DATACLEAN_CTE_STARTUP_SECONDS must be in [0, 60]")
+if not re.fullmatch(r"[A-Za-z0-9_.-]+", CAR_LAUNCH_FILE):
+    raise ValueError("DATACLEAN_CAR_LAUNCH_FILE must be a launch filename without path separators")
 
 class EvalController(Tool):
     name = "eval_controller"
@@ -44,13 +47,13 @@ class EvalController(Tool):
             },
             "n_images": {
                 "type": "integer",
-                "description": "Number of images to collect before the evaluation run exits (default 500)."
+                "description": "Number of images to collect before the evaluation run exits (default 1000)."
             }
         },
         "required": []
     }
     
-    def run(self, controller_path=None, n_images=500, branch="main", workspace_dir=None,
+    def run(self, controller_path=None, n_images=1000, branch="main", workspace_dir=None,
             cancel_event=None, **_):
         s = _load(workspace_dir, branch=branch)
         _ensure_constraints(s, branch)
@@ -122,6 +125,7 @@ class EvalController(Tool):
             "controller_fingerprint": deployed_controller.get("controller_fingerprint"),
             "controller_path": target_file,
             "n_images_target": num_images,
+            "car_launch_file": CAR_LAUNCH_FILE,
             "remote_data_path": remote_tar_path,
             "remote_cte_path": remote_cte_path,
         }
@@ -175,7 +179,7 @@ class EvalController(Tool):
                     f"mkdir -p {shlex.quote(remote_image_dir)} && "
                     f"cd {shlex.quote(IROS_WS_DIR)} && "
                     "source devel/setup.bash && "
-                    "roslaunch iros_bringup self_evolve_paper.launch "
+                    f"roslaunch iros_bringup {shlex.quote(CAR_LAUNCH_FILE)} "
                     f"{shlex.quote('model_path:=' + controller_remote)} "
                     f"{shlex.quote('exit_threshold:=' + str(num_images))} "
                     f"{shlex.quote('data_folder:=' + remote_data_dir)} && "
@@ -240,6 +244,7 @@ class EvalController(Tool):
             "collection_id": collection_id,
             "deployment": d,
             "controller_evaluated": target_file,
+            "car_launch_file": CAR_LAUNCH_FILE,
             "anonymous_source": anonymous_source,
             "n_images_target": num_images,
             "collection_images_budget_used": s["collection_images_budget_used"],

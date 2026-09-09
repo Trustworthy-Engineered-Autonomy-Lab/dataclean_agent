@@ -55,8 +55,11 @@ class ConfigureTaskDataset(Tool):
             },
             "default_cap": {
                 "type": "integer",
-                "minimum": 1,
-                "description": "Cap applied to every source not named in source_caps.",
+                "minimum": 0,
+                "description": (
+                    "Cap applied to every source not named in source_caps; 0 explicitly "
+                    "excludes all unlisted sources."
+                ),
             },
             "include_sources": {
                 "type": "array",
@@ -101,7 +104,7 @@ class ConfigureTaskDataset(Tool):
                 for value in re.findall(r"\d[\d,]*", user_request_text)
             }
             operation_numbers = {int(value) for value in source_caps.values()}
-            if default_cap is not None:
+            if default_cap is not None and int(default_cap) > 0:
                 operation_numbers.add(int(default_cap))
             if operation_numbers and not operation_numbers.issubset(request_numbers):
                 raise PermissionError(
@@ -117,9 +120,9 @@ class ConfigureTaskDataset(Tool):
                 )
             request_basis = user_request_text.strip()
         if default_cap is not None and (
-            not isinstance(default_cap, int) or isinstance(default_cap, bool) or default_cap < 1
+            not isinstance(default_cap, int) or isinstance(default_cap, bool) or default_cap < 0
         ):
-            raise ValueError("default_cap must be a positive integer")
+            raise ValueError("default_cap must be a non-negative integer")
         for name, value in source_caps.items():
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ValueError(f"source_caps.{name} must be a positive integer")
@@ -169,6 +172,17 @@ class ConfigureTaskDataset(Tool):
 
         registry = _dataset_config(workspace_dir)
         sources = registry.get("sources") or []
+        effective_include_sources = include_sources
+        if default_cap == 0 and not effective_include_sources:
+            # ``default_cap=0`` is the natural structured representation of
+            # "select the named sources only".  Convert it into an explicit
+            # include list before materializing D_0; otherwise an incomplete
+            # cap dictionary would leave unnamed sources uncapped.
+            effective_include_sources = list(source_caps.keys())
+            if not effective_include_sources:
+                raise ValueError(
+                    "default_cap=0 requires at least one explicitly named source"
+                )
         normalized_explicit = ConfigureDataset._normalize_subset(
             registry, None, None, source_caps
         )["max_per_source"]
@@ -177,9 +191,9 @@ class ConfigureTaskDataset(Tool):
             real_name = source["name"]
             if real_name in normalized_explicit:
                 caps[real_name] = normalized_explicit[real_name]
-            elif default_cap is not None:
+            elif default_cap is not None and default_cap > 0:
                 caps[real_name] = int(default_cap)
-        if not caps and not include_sources and not exclude_sources:
+        if not caps and not effective_include_sources and not exclude_sources:
             raise ValueError("The requested caps did not select any configured source")
 
         before = {
@@ -190,7 +204,7 @@ class ConfigureTaskDataset(Tool):
         original_state = copy.deepcopy(state)
         original_spec = _load_task_spec(workspace_dir, branch=branch)
         configured = json.loads(ConfigureDataset().run(
-            include_sources=include_sources,
+            include_sources=effective_include_sources,
             exclude_sources=exclude_sources,
             max_per_source=caps or None,
             branch=branch,

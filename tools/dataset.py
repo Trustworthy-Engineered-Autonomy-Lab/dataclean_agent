@@ -11,11 +11,11 @@ _ML_IMPORT_ERROR = None
 try:
     import torch
     from torch.utils.data import Dataset
-    from .models import TRANSFORM_224_224
+    from .models import TRANSFORM_IROS
 except Exception as exc:  # Dataset configuration/state tools remain usable without ML extras.
     _ML_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
     torch = None
-    TRANSFORM_224_224 = None
+    TRANSFORM_IROS = None
     class Dataset:  # type: ignore[no-redef]
         pass
 from .io import ROOT, _artifact, _write_json_atomic
@@ -130,7 +130,7 @@ class DrivingDataset(Dataset):
         return len(self.records)
 
     def __getitem__(self, idx):
-        if torch is None or TRANSFORM_224_224 is None:
+        if torch is None or TRANSFORM_IROS is None:
             suffix = f" ({_ML_IMPORT_ERROR})" if _ML_IMPORT_ERROR else ""
             raise RuntimeError(
                 "PyTorch and torchvision are required for model training/scoring" + suffix
@@ -140,7 +140,7 @@ class DrivingDataset(Dataset):
         if not img_path.is_relative_to(self.workspace_dir.resolve()):
             raise ValueError(f"Sample image escapes workspace: {rec['image']}")
         img = Image.open(img_path).convert('RGB')
-        tensor_img = TRANSFORM_224_224(img)
+        tensor_img = TRANSFORM_IROS(img)
         steer = torch.tensor([rec["steering"]], dtype=torch.float32)
         return tensor_img, steer, idx
 
