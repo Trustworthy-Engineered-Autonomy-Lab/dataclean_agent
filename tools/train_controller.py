@@ -259,6 +259,14 @@ class TrainController(Tool):
 
             onnx_path = _artifact(workspace_dir, f"{cid}.onnx", branch=branch)
             tmp_onnx = onnx_path.with_suffix(onnx_path.suffix + ".tmp")
+            # The physical-car workflow expects the model weights as the
+            # standard ONNX external-data companion, ``<model>.onnx.data``.
+            # Export to a temporary graph first, then externalize all tensor
+            # initializers into the final companion name before atomically
+            # publishing the graph.  This avoids leaving a ``.tmp.data``
+            # file that no deployment step can find.
+            onnx_data_path = onnx_path.with_name(onnx_path.name + ".data")
+            onnx_data_path.unlink(missing_ok=True)
             model_cpu = ControllerCNN().cpu()
             model_cpu.load_state_dict(model.state_dict())
             model_cpu.eval()
@@ -266,6 +274,7 @@ class TrainController(Tool):
             dummy_input = torch.zeros(
                 1, IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS, dtype=torch.float32
             )
+            export_succeeded = False
             try:
                 torch.onnx.export(
                     deployment_model,
@@ -273,19 +282,43 @@ class TrainController(Tool):
                     tmp_onnx,
                     export_params=True,
                     opset_version=17,
-                    # Keep the lab's TorchScript/opset-17 export path explicit.
-                    # Newer torch defaults to Dynamo, which adds onnxscript and
-                    # may emit external weights for this temporary filename.
+                    # Keep the lab's TorchScript/opset-17 graph export path
+                    # explicit. Externalization is performed below so the
+                    # companion filename is deterministic.
                     dynamo=False,
                     do_constant_folding=True,
                     input_names=["image"],
                     output_names=["steer"]
                 )
+                onnx_model = onnx.load(str(tmp_onnx), load_external_data=False)
+                onnx.save_model(
+                    onnx_model,
+                    str(tmp_onnx),
+                    save_as_external_data=True,
+                    all_tensors_to_one_file=True,
+                    location=onnx_data_path.name,
+                    size_threshold=0,
+                )
+                if not onnx_data_path.is_file() or onnx_data_path.stat().st_size == 0:
+                    raise RuntimeError(
+                        "ONNX external-data export did not create a non-empty "
+                        f"companion file: {onnx_data_path.name}"
+                    )
+                # Loading normally resolves the companion relative to the
+                # graph and therefore verifies that the pair is usable.
                 onnx.checker.check_model(onnx.load(str(tmp_onnx)))
                 os.replace(tmp_onnx, onnx_path)
+                export_succeeded = True
             finally:
                 tmp_onnx.unlink(missing_ok=True)
-            print_progress(f"[TrainController] Successfully exported single ONNX model to {onnx_path.name}")
+                if not export_succeeded:
+                    # A failed/partial export must not leave a stale or
+                    # incomplete companion that could be paired with a graph.
+                    onnx_data_path.unlink(missing_ok=True)
+            print_progress(
+                f"[TrainController] Successfully exported ONNX model and external weights "
+                f"to {onnx_path.name} and {onnx_data_path.name}"
+            )
         finally:
             del model
             if "train_loader" in locals():
@@ -315,9 +348,10 @@ class TrainController(Tool):
             "controller_epochs_used_total": s.get("controller_train_epochs_used", 0),
             "weights_pt_artifact": ckpt_path.name,
             "weights_onnx_artifact": onnx_path.name,
+            "weights_onnx_data_artifact": onnx_data_path.name,
             "onnx_input_contract": (
                 f"float32 NHWC [N,{IMAGE_HEIGHT},{IMAGE_WIDTH},{IMAGE_CHANNELS}], "
-                "pixel range [0,255]"
+                "cropped IROS frame, pixel range [0,255]"
             ),
             "onnx_input_shape": [IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS],
             "input_contract_version": INPUT_CONTRACT_VERSION,

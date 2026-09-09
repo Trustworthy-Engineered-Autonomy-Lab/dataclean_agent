@@ -1,12 +1,32 @@
 import torch
 import torch.nn as nn
 from torchvision import transforms
-from .image_contract import IMAGE_HEIGHT, IMAGE_WIDTH
+from .image_contract import (
+    IMAGE_CROP_TOP, IMAGE_HEIGHT, IMAGE_WIDTH, RAW_IMAGE_HEIGHT,
+)
 
-TRANSFORM_224_224 = transforms.Compose([
-    transforms.Resize((IMAGE_HEIGHT, IMAGE_WIDTH)),
+def _crop_iros_frame(image):
+    """Apply the exact crop used by utils.proc_collected_data()."""
+    if image.width != IMAGE_WIDTH or image.height not in (RAW_IMAGE_HEIGHT, IMAGE_HEIGHT):
+        raise ValueError(
+            f"IROS2026 expects RGB frames {IMAGE_WIDTH}x{RAW_IMAGE_HEIGHT} "
+            f"(raw) or {IMAGE_WIDTH}x{IMAGE_HEIGHT} (already cropped); "
+            f"got {image.width}x{image.height}"
+        )
+    if image.height == IMAGE_HEIGHT:
+        return image
+    return image.crop((0, IMAGE_CROP_TOP, IMAGE_WIDTH, RAW_IMAGE_HEIGHT))
+
+
+TRANSFORM_IROS = transforms.Compose([
+    transforms.Lambda(_crop_iros_frame),
     transforms.ToTensor(),
 ])
+
+# Compatibility alias for callers that imported the old name.  The old
+# implementation resized to 224x224; this alias now intentionally means the
+# canonical IROS preprocessing path.
+TRANSFORM_224_224 = TRANSFORM_IROS
 
 _ENCODED_HEIGHT = IMAGE_HEIGHT // 8
 _ENCODED_WIDTH = IMAGE_WIDTH // 8
@@ -41,7 +61,7 @@ class SteerEncoder(nn.Sequential):
 
 
 class IROS2026CAE(nn.Module):
-    """IROS2026 action-conditioned CAE, adapted to RGB 224x224.
+    """IROS2026 action-conditioned CAE with the original 144x224 input.
 
     Three image convolution stages; the image and steering embeddings are
     averaged before reconstruction. There is no steering prediction head/loss.
@@ -67,7 +87,7 @@ class IROS2026CAE(nn.Module):
 class ControllerCNN(nn.Module):
     """
     NVIDIA-style CNN architecture for End-to-End Steering Angle Prediction.
-    Input: (N, 3, 224, 224)
+    Input: (N, 3, 144, 224)
     Output: (N, 1) steering prediction
     """
     def __init__(self):
@@ -95,6 +115,9 @@ class ControllerCNN(nn.Module):
             nn.Linear(50, 10),
             nn.ReLU(inplace=True),
             nn.Linear(10, 1),
+            # Match the IROS controller exactly: steering is bounded to the
+            # vehicle's legal [-1, 1] range at inference and during training.
+            nn.Hardtanh(),
         )
 
     def forward(self, x):

@@ -2,7 +2,7 @@
 
 import math
 
-DETECTOR_ARCHITECTURE = "iros2026-action-conditioned-cae-224-v1"
+DETECTOR_ARCHITECTURE = "iros2026-action-conditioned-cae-144x224-v2"
 SCORE_CONTRACT_VERSION = "iros2026-pcc-normality-v1"
 
 

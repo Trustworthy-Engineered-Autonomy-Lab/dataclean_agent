@@ -82,9 +82,11 @@ class DeployController(Tool):
                     print_progress(f"[DeployController] Uploading {source_path.name} -> {target_path}...")
                     sftp.put(str(source_path), str(target_path))
 
+                    uploaded_data_files = []
                     data_candidates = [
                         source_path.with_name(source_path.name + ".data"),
                         source_path.with_name(source_path.name + ".tmp.data"),
+                        source_path.with_suffix(".data"),
                     ]
 
                     for data_file in data_candidates:
@@ -94,6 +96,7 @@ class DeployController(Tool):
                                 f"[DeployController] Uploading companion data {data_file.name}..."
                             )
                             sftp.put(str(data_file), str(target_data_path))
+                            uploaded_data_files.append(data_file.name)
 
         except Exception as e:
             res = {"status": "failed", "error": f"Failed to deploy {source_path.name}: {e}"}
@@ -108,6 +111,7 @@ class DeployController(Tool):
             "car_host": HOSTNAME,
             "onnx_input_shape": shape,
             "input_contract_version": INPUT_CONTRACT_VERSION,
+            "external_data_files": uploaded_data_files,
         }
         s["last_deployed_controller"] = res
         record_observation(s, "deploy_controller", res, workspace_dir=workspace_dir, branch=branch)

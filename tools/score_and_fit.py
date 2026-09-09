@@ -60,7 +60,7 @@ class ScoreAndFit(Tool):
             or detector_meta.get("input_contract_version") != INPUT_CONTRACT_VERSION
         ):
             raise ValueError(
-                "Detector checkpoint is not the IROS2026 224x224 action-conditioned CAE. "
+                "Detector checkpoint is not the IROS2026 144x224 action-conditioned CAE. "
                 "Retrain the detector before scoring."
             )
 

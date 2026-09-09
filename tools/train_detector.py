@@ -18,14 +18,9 @@ from .utils import _load, _save, _artifact, _records, DrivingDataset, _ensure_co
 
 
 def _default_reference_latents(sample_count):
-    """Return the default frozen-reference latent count for the IROS2026 CAE.
-
-    Large datasets use a fixed 500-reference budget; smaller datasets use ten
-    percent of the round input.  The boundary value 5000 follows the small
-    dataset branch (floor(5000 / 10) = 500).
-    """
+    """Return the IROS2026 frozen-reference latent count (one per 50 samples)."""
     n = int(sample_count)
-    return 500 if n > 5000 else max(1, n // 10)
+    return max(1, n // 50)
 
 
 class TrainDetector(Tool):
@@ -34,7 +29,7 @@ class TrainDetector(Tool):
         "Train or reuse the IROS2026 image+steering CAE on current D_t. "
         "Loss is reconstruction MSE + lambda * nearest frozen-reference latent MSE, "
         "active from epoch 1. No steering-prediction head or warm-up. "
-        "Reference default: 500 latents when N>5000, otherwise max(1, floor(N/10)); batch default: 256. "
+        "Reference default: max(1, floor(N/50)), matching the IROS2026 workflow; batch default: 256. "
         "For retraining, provide learning_rate, epochs, lambda_value and seed; reuse does not require them."
     )
     parameters = {
@@ -63,7 +58,7 @@ class TrainDetector(Tool):
             "n_reference_latents": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Optional reference count override. Omit for the default: 500 when N>5000, otherwise max(1, floor(N/10))."
+                "description": "Optional reference count override. Omit for the IROS2026 default max(1, floor(N/50))."
             },
             "seed": {"type": "integer", "description": "Training RNG seed."},
             "rationale": {
@@ -227,7 +222,7 @@ class TrainDetector(Tool):
                 or detector_meta.get("input_contract_version") != INPUT_CONTRACT_VERSION
             ):
                 raise ValueError(
-                    "The requested detector does not declare the current 224x224 input "
+                    "The requested detector does not declare the current IROS 144x224 input "
                     "contract. Retrain the detector before reuse."
                 )
             ckpt_path = _artifact(workspace_dir, f"{detector_id}.pt", branch=branch)
