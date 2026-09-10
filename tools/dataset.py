@@ -34,7 +34,7 @@ __all__ = [
 _REGISTRY_FIELDS = (
     "dataset_path", "dataset_id", "dataset_mode", "sources",
     "image_column", "steering_column", "raw_samples", "source_composition",
-    "max_per_source", "vlm",
+    "include_sources", "exclude_sources", "max_per_source", "vlm",
 )
 
 _ANON_PREDEFINED = {
@@ -217,7 +217,11 @@ def _subset_config(state, reg, ignore_subset=False):
     subset_params = (state or {}).get("dataset_subset") or {}
     sources = list(reg["sources"])
     inc = subset_params.get("include_sources")
+    if inc is None:
+        inc = reg.get("include_sources")
     exc = subset_params.get("exclude_sources")
+    if exc is None:
+        exc = reg.get("exclude_sources")
     if inc:
         allow = set(inc)
         sources = [s for s in sources if s["name"] in allow]

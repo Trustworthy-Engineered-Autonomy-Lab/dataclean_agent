@@ -11,7 +11,7 @@ import database
 from agent import Agent
 from tools import Tool, optional_dependency_errors
 from tools.utils import (
-    ROOT, TASKS_DIR, _load, _dataset_config, _task_dir, _write_json_atomic,
+    ROOT, TASKS_DIR, _load, _dataset_config, _raw_records, _task_dir, _write_json_atomic,
     backfill_decision_log,
 )
 from tools.policies import LEDGER_FIELDS, policies_payload
@@ -326,6 +326,28 @@ async def save_settings(request: Request):
     _write_json_atomic(SETTINGS, old)
     return {"ok": True}
 
+def _reinit_draft_tasks_d0(p):
+    """Re-freeze D_0 for DRAFT tasks that haven't started, so they pick up
+    the workspace's current dataset registration/default slice."""
+    initialized, initialization_errors = [], {}
+    tasks_root = Path(p) / ROOT / TASKS_DIR
+    for task_dir in sorted(tasks_root.iterdir()) if tasks_root.is_dir() else []:
+        if not task_dir.is_dir():
+            continue
+        try:
+            task_state = _load(p, branch=task_dir.name)
+            if (
+                task_state.get("task_status", "DRAFT") == "DRAFT"
+                and not task_state.get("round_input_dataset")
+            ):
+                Tool.get("configure_dataset").run(
+                    workspace_dir=p, branch=task_dir.name
+                )
+                initialized.append(task_dir.name)
+        except Exception as exc:
+            initialization_errors[task_dir.name] = str(exc)
+    return initialized, initialization_errors
+
 @app.post("/api/configure")
 async def configure(request: Request):
     p = workspace()
@@ -339,24 +361,30 @@ async def configure(request: Request):
         result = json.loads(tool.run(**kwargs))
     except Exception as exc:
         raise HTTPException(400, str(exc))
-    initialized, initialization_errors = [], {}
+    initialized, initialization_errors = ([], {})
     if result.get("configured"):
-        tasks_root = Path(p) / ROOT / TASKS_DIR
-        for task_dir in sorted(tasks_root.iterdir()) if tasks_root.is_dir() else []:
-            if not task_dir.is_dir():
-                continue
-            try:
-                task_state = _load(p, branch=task_dir.name)
-                if (
-                    task_state.get("task_status", "DRAFT") == "DRAFT"
-                    and not task_state.get("round_input_dataset")
-                ):
-                    Tool.get("configure_dataset").run(
-                        workspace_dir=p, branch=task_dir.name
-                    )
-                    initialized.append(task_dir.name)
-            except Exception as exc:
-                initialization_errors[task_dir.name] = str(exc)
+        initialized, initialization_errors = _reinit_draft_tasks_d0(p)
+    result["initialized_d0_tasks"] = initialized
+    result["d0_initialization_errors"] = initialization_errors
+    return result
+
+@app.post("/api/dataset/subset")
+async def configure_dataset_subset(request: Request):
+    """Stage 2 of dataset configuration: persist the workspace's default
+    per-source slice (include/exclude/max_per_source), applied to any task
+    that doesn't declare its own dataset_subset."""
+    p = workspace()
+    data = await request.json()
+    tool = Tool.get("configure_dataset")
+    kwargs = {"workspace_dir": p, "persist_default_subset": True}
+    for k in ("include_sources", "exclude_sources", "max_per_source"):
+        if k in data:
+            kwargs[k] = data[k]
+    try:
+        result = json.loads(tool.run(**kwargs))
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+    initialized, initialization_errors = _reinit_draft_tasks_d0(p)
     result["initialized_d0_tasks"] = initialized
     result["d0_initialization_errors"] = initialization_errors
     return result
@@ -375,11 +403,19 @@ def dataset_status():
     p = workspace()
     try:
         reg = _dataset_config(p)
+        try:
+            active_samples = len(_raw_records(p, branch="", ignore_subset=False))
+        except Exception:
+            active_samples = None
         return {"configured": True, "dataset_id": reg.get("dataset_id"),
                 "dataset_mode": reg.get("dataset_mode"), "raw_samples": reg.get("raw_samples"),
+                "active_samples": active_samples,
                 "source_composition": reg.get("source_composition"),
                 "sources": [s.get("name") for s in reg.get("sources", [])],
-                "dataset_path": reg.get("dataset_path")}
+                "dataset_path": reg.get("dataset_path"),
+                "include_sources": reg.get("include_sources"),
+                "exclude_sources": reg.get("exclude_sources"),
+                "max_per_source": reg.get("max_per_source")}
     except Exception as exc:
         return {"configured": False, "error": str(exc)}
 
