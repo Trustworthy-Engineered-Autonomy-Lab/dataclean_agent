@@ -672,10 +672,6 @@ async def chat(chat_id: int, request: Request):
             c.append("user", text)
             print(f"[chat] task={task_id!r} chat_id={chat_id}", flush=True)
 
-            # Initialize trajectory recorder for this turn
-            from tools.trajectory_recorder import init_trajectory_recorder
-            init_trajectory_recorder(str(p), task_name=task_id)
-
             ledger_block = _format_ledger(_load_ledger(p, task_id))
             system_content = build_context(p, task_id) + "\n\n" + prompt(p)
             if ledger_block:

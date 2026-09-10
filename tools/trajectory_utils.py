@@ -16,9 +16,10 @@ class TrajectoryAnalyzer:
             self.trajectory = json.load(f)
 
     @staticmethod
-    def load_from_workspace(workspace_dir: str) -> Optional['TrajectoryAnalyzer']:
-        """Load the most recent trajectory from workspace"""
-        traj_dir = Path(workspace_dir) / "agent_trajectories"
+    def load_from_workspace(workspace_dir: str, task_id: str) -> Optional['TrajectoryAnalyzer']:
+        """Load the most recent trajectory for one task"""
+        from .io import _task_dir
+        traj_dir = _task_dir(workspace_dir, branch=task_id, create=False) / "agent_trajectories"
         if not traj_dir.exists():
             return None
 

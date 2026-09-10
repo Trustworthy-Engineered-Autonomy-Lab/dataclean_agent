@@ -246,9 +246,16 @@ class Turn:
         # occurred. Values keep bounded retry metadata for genuinely transient
         # errors; changed experiment state invalidates the record lazily.
         self.failed_operational_calls = {}
-        # Initialize trajectory recorder
-        from tools.trajectory_recorder import get_trajectory_recorder
-        self.trajectory_recorder = get_trajectory_recorder()
+        # Initialize trajectory recorder, scoped to this turn's own task so
+        # concurrent turns for different tasks never share (or race on) one
+        # recorder instance.
+        from tools.trajectory_recorder import TrajectoryRecorder
+        traj_workspace_dir = self.context.get("workspace_dir")
+        traj_branch = self.context.get("branch")
+        self.trajectory_recorder = (
+            TrajectoryRecorder(traj_workspace_dir, task_name=traj_branch)
+            if traj_workspace_dir and traj_branch else None
+        )
         self._trajectory_call_map = {}  # Map tool_call_id -> recorder_call_idx
         self._trajectory_step_counter = 0  # Counter for pipeline steps
         if self.trajectory_recorder:
