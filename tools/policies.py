@@ -3,7 +3,7 @@ POLICIES = {
         "pcc": "IROS2026 raw reconstruction PCC as weak reconstruction-agreement evidence; no class-label interpretation, composite weighting, or normalization",
     },
     "partition": {
-        "data_driven": "For BC>=0.555, arbitrate mean-k*std, K-means (K=2), and KDE; for BC<0.555 or unavailable, directly estimate the anomaly ratio and apply its empirical lower-tail PCC quantile. Use a single keep/gray boundary and a fixed 20% maximum plausible anomaly ratio.",
+        "data_driven": "Arbitrate among mean-k*std, K-means (K=2), and KDE using the current score distribution and plot evidence; BC informs which candidate is likely best (prefer K-means when BC>=0.555) but never restricts which strategy is legal. Use a single keep/gray boundary.",
     },
     "resolve": {
         "vlm": "Gray zone reviewed by local VLM, keep + accepted samples form clean dataset",

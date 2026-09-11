@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .io import _task_dir
+
 
 class TrajectoryRecorder:
     """Records ChatGPT agent tool calls, results, and execution metadata"""
@@ -15,7 +17,7 @@ class TrajectoryRecorder:
     def __init__(self, workspace_dir: str, task_name: str = "default"):
         self.workspace_dir = Path(workspace_dir)
         self.task_name = task_name
-        self.traj_dir = self.workspace_dir / "agent_trajectories"
+        self.traj_dir = _task_dir(workspace_dir, branch=task_name, create=True) / "agent_trajectories"
         self.traj_dir.mkdir(exist_ok=True)
 
         # Create trajectory file with timestamp
@@ -205,19 +207,3 @@ class TrajectoryRecorder:
     def get_trajectory_path(self) -> str:
         """Get path to trajectory file"""
         return str(self.traj_file)
-
-
-# Global trajectory recorder instance
-_recorder: Optional[TrajectoryRecorder] = None
-
-
-def init_trajectory_recorder(workspace_dir: str, task_name: str = "default"):
-    """Initialize global trajectory recorder"""
-    global _recorder
-    _recorder = TrajectoryRecorder(workspace_dir, task_name)
-    return _recorder
-
-
-def get_trajectory_recorder() -> Optional[TrajectoryRecorder]:
-    """Get global trajectory recorder instance"""
-    return _recorder
