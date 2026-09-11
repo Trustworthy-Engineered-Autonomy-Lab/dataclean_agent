@@ -3,7 +3,7 @@ POLICIES = {
         "pcc": "IROS2026 raw reconstruction PCC as weak reconstruction-agreement evidence; no class-label interpretation, composite weighting, or normalization",
     },
     "partition": {
-        "data_driven": "Arbitrate among mean-k*std, K-means (K=2), and KDE using the current score distribution and plot evidence; BC informs which candidate is likely best (prefer K-means when BC>=0.555) but never restricts which strategy is legal. Use a single keep/gray boundary.",
+        "data_driven": "BC-gated arbitration: when BC>=0.555 (bimodal) use K-means (K=2); when BC<0.555 or unavailable (unimodal) estimate an anomaly ratio and let the runtime derive mean-k*std via k=norm.ppf(1-ratio/100); KDE is a rare, explicitly justified fallback only, requiring a stable valley. Use a single keep/gray boundary.",
     },
     "resolve": {
         "vlm": "Gray zone reviewed by local VLM, keep + accepted samples form clean dataset",

@@ -182,6 +182,7 @@ def plot_strategy_distribution(scores, output, round_index, strategy, lines, kde
         "mean_std": "mean-k*std candidate thresholds",
         "kmeans": "K-Means (K=2) candidate threshold",
         "kde": "KDE candidate threshold",
+        "mean_std_ratio": "estimated-ratio mean-k*std candidate thresholds",
     }
     return _plot(
         scores,
