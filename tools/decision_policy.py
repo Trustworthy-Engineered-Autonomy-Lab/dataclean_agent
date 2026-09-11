@@ -53,8 +53,8 @@ def validate_fixed_policy(policy):
         errors.append("score must preregister method=pcc without alpha (reconstruction agreement only)")
     partition = policy["partition"]
     strategy = partition.get("strategy")
-    if strategy not in ("mean_std", "kmeans", "kde"):
-        errors.append("partition.strategy must be mean_std, kmeans, or kde")
+    if strategy not in ("mean_std", "kmeans", "kde", "mean_std_ratio"):
+        errors.append("partition.strategy must be mean_std, kmeans, kde, or mean_std_ratio")
     if strategy == "mean_std":
         try:
             k = float(partition["mean_std_k"])
@@ -76,6 +76,13 @@ def validate_fixed_policy(policy):
             int(partition["kde_valley_index"])
         except (KeyError, TypeError, ValueError):
             errors.append("partition.kde_bandwidth_scale and kde_valley_index are required for kde")
+    if strategy == "mean_std_ratio":
+        try:
+            ratio = float(partition["estimated_anomaly_ratio_percent"])
+            if not 0.1 <= ratio <= 5.0:
+                errors.append("partition.estimated_anomaly_ratio_percent must be in [0.1, 5.0]")
+        except (KeyError, TypeError, ValueError):
+            errors.append("partition.estimated_anomaly_ratio_percent is required for mean_std_ratio")
     if policy["resolve"].get("resolution_policy") not in ("vlm", "auto_keep"):
         errors.append("resolve.resolution_policy is invalid")
     for field in ("resolution_policy", "budget", "sampling_strategy", "accept_confidence"):

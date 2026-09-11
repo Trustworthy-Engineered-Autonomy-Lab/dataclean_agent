@@ -21,7 +21,7 @@ from tools.agent_protocol import (
     record_turn_completed,
 )
 
-AGENT_PROMPT_VERSION = "conversation-driven-runtime-v7-partition-visual-prior"
+AGENT_PROMPT_VERSION = "conversation-driven-runtime-v8-partition-bc-gate-enforced"
 _NON_OPERATIONAL_ARGUMENTS = {"rationale", "request_basis"}
 _PROTOCOL_MUTATION_TOOLS = {
     "propose_experiment_episode", "assess_experiment_episode",
