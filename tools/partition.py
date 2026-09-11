@@ -15,11 +15,10 @@ MEAN_STD_K_VALUES = tuple(round(i / 10, 1) for i in range(21))
 MEAN_STD_PLOT_K_VALUES = (0.5, 0.7, 0.9, 1.0, 1.1, 1.3, 1.5)
 KDE_BANDWIDTH_SCALES = (0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00)
 KMEANS_RANDOM_STATE = 0
-ANOMALY_UB_PERCENT = 20.0
 
 
 # This is intentionally scoped to partition arbitration.  It is not part of
-# the global Agent prompt, so its aggressive threshold policy cannot control
+# the global Agent prompt, so its threshold policy cannot control
 # unrelated training, deployment, or round-transition decisions.
 PARTITION_PRIOR_PROMPT = r'''You are a threshold arbitration expert for unsupervised anomaly detection.
 
@@ -28,9 +27,10 @@ You are given the distribution of Pearson Correlation Coefficient (PCC) reconstr
 
 Prior knowledge: HIGH PCC = normal driving (good reconstruction); LOW PCC = suspected anomalous driving.
 
-## Cleaning policy (IMPORTANT)
-Cut AGGRESSIVELY. It is acceptable to remove some genuinely normal samples, because a downstream VLM goodness-review recovers wrongly-removed normal samples back into the training set. Therefore, when in doubt, cut MORE, not less.
-Do NOT be conservative to protect normal samples; the recovery stage handles that.
+## Cleaning policy
+Choose the threshold from the currently observed score distribution, plot evidence,
+and available downstream feedback. Do not impose a preferred amount of removal:
+neither retaining more nor removing more is correct without supporting evidence.
 
 ## Inputs
 1. IMAGE: strategy-specific, label-free views of all PCC scores. The KDE view keeps the PCC-versus-sample-index scatter as its main panel and includes a PCC-versus-density KDE panel. A KDE threshold is drawn only when a stable valley exists:
@@ -44,7 +44,6 @@ Do NOT be conservative to protect normal samples; the recovery stage handles tha
    - tau_kde = {T_KDE} -> removes {DEL_KDE}% of data (or unavailable when no stable valley exists)
    - tau_meanstd = {T_MEANSTD} (k={K_VALUE}) -> removes {DEL_MEANSTD}% of data
    - PCC range: [{PCC_MIN}, {PCC_MAX}], mean={PCC_MEAN}, std={PCC_STD}
-   - max plausible anomaly ratio (prior upper bound): 20%
 
 ## Decision rule (MUST follow, in order)
 Step 1 - Read the BC gate:
@@ -52,16 +51,14 @@ Step 1 - Read the BC gate:
    - If BC < 0.555 (UNIMODAL), or the BC value is unavailable: do NOT choose a statistical strategy. Directly estimate the plausible anomaly ratio from the current PCC statistics, the PCC scatter plot, and previous-round VLM aggregate feedback when available. This estimate is a belief about the current round, not a ground-truth label or a fixed normal-rate assumption.
 Step 2 - Sanity-adjust the preferred tau using the image and context:
    - For the BIMODAL branch, confirm the preferred tau lands at or just above the visible separation between the low-PCC tail and the main score band. Use the KDE density panel and structured candidates as authoritative; the scatter panel alone does not show density.
-   - For the UNIMODAL/BC-unavailable branch, choose an estimated anomaly ratio from 0% to the 20% hard upper bound, then use the corresponding empirical lower-tail PCC quantile as the threshold. Do not select mean-std, K-Means, or KDE in this branch.
-   - Given the aggressive policy, if two candidates are close, pick the one that removes MORE (larger tau), UNLESS it would exceed the 20% max plausible anomaly ratio by a large margin.
-   - Never choose a tau whose deletion ratio grossly exceeds 20%.
+   - For the UNIMODAL/BC-unavailable branch, choose an estimated anomaly ratio from 0% to 100% using the available evidence, then use the corresponding empirical lower-tail PCC quantile as the threshold. Do not select mean-std, K-Means, or KDE in this branch.
 Step 3 - tau_kde is a cross-check, not the default in the BIMODAL branch: only override the BC-preferred choice if a stable KDE valley is available, clearly deeper/cleaner, AND better placed on the gap. If KDE reports no stable valley, do not invent a KDE threshold. KDE is not a choice in the UNIMODAL/BC-unavailable branch.
 
 ## Reasoning steps (think in this order)
 1. Report BC and whether the gate says bimodal or unimodal.
 2. Describe the visible PCC separation and low-score tail from the plot, and report whether the KDE density agrees with the BC gate.
 3. For the BIMODAL branch, identify which candidate tau sits best on the gap. For the UNIMODAL/BC-unavailable branch, estimate the plausible anomaly-ratio range using current evidence and previous-round VLM feedback when available.
-4. Check whether the aggressive high-recall policy justifies a larger tau without exceeding 20% deletion.
+4. Check whether the selected deletion ratio is supported by the available evidence and state the main uncertainty.
 5. Give the final tau. In the UNIMODAL/BC-unavailable branch, report that it came from direct anomaly-ratio estimation and an empirical lower-tail quantile, not a statistical candidate strategy.
 
 ## Output - JSON ONLY, no prose, no markdown fences
@@ -74,7 +71,7 @@ Step 3 - tau_kde is a cross-check, not the default in the BIMODAL branch: only o
   "chosen_tau": 0.0,
   "expected_deletion_ratio": 0.0,
   "gap_location": "<short description>",
-  "rationale": "<2-3 sentences: BC gate result, gap placement, why this tau given the aggressive-recall policy>"
+  "rationale": "<2-3 sentences: BC gate result, gap placement, and evidence supporting this threshold>"
 }
 
 Runtime adapter: when operating through the partition function interface, express the selected method, supported hyperparameters, and rationale through tool arguments. Do not expose private chain-of-thought.'''
@@ -200,8 +197,8 @@ class Partition(Tool):
             "strategy": {"type": "string", "enum": list(STRATEGIES),
                          "description": "Provide for the bimodal candidate branch; omit for analysis or direct anomaly-ratio mode."},
             "estimated_anomaly_ratio_percent": {
-                "type": "number", "minimum": 0, "maximum": 20,
-                "description": "For BC<0.555/unavailable: estimated current-round anomaly percentage, converted to the empirical lower-tail PCC quantile; hard maximum is 20%.",
+                "type": "number", "minimum": 0, "maximum": 100,
+                "description": "For BC<0.555/unavailable: estimated current-round anomaly percentage, converted to the empirical lower-tail PCC quantile.",
             },
             "mean_std_k": {"type": "number", "minimum": 0, "maximum": 2,
                            "description": "For mean_std: k in [0.0, 2.0] at increments of 0.1."},
@@ -274,7 +271,6 @@ class Partition(Tool):
             summary = {"mode": "analyze", "score_contract": score_contract(),
                        "n_samples": len(records), "score_stats": stats, "candidates": candidate_view,
                        "previous_round_vlm_feedback": previous_vlm_feedback,
-                       "anomaly_ratio_upper_bound_percent": ANOMALY_UB_PERCENT,
                        "partition_plots": plot_artifacts, "plot_errors": plot_errors,
                        "partition_prior_prompt": prior,
                        "agent_visible_artifacts": agent_visible_artifacts}
@@ -340,11 +336,6 @@ class Partition(Tool):
         keep = [r for r in records if float(r["normality_score"]) >= threshold]
         gray = [r for r in records if float(r["normality_score"]) < threshold]
         removal_percent = len(gray) / max(1, len(records)) * 100.0
-        if removal_percent > ANOMALY_UB_PERCENT + 1e-9:
-            raise ValueError(
-                f"Selected threshold removes {removal_percent:.2f}% of data, "
-                f"above the fixed {ANOMALY_UB_PERCENT:.0f}% anomaly upper bound"
-            )
         effective_params = {"strategy": strategy, "threshold_mode": threshold_mode, **params}
         if evidence:
             effective_params["evidence"] = evidence
@@ -380,7 +371,6 @@ class Partition(Tool):
                    "score_stats": stats, "candidates": candidate_view,
                    "previous_round_vlm_feedback": previous_vlm_feedback,
                    "evidence": evidence,
-                   "anomaly_ratio_upper_bound_percent": ANOMALY_UB_PERCENT,
                    "partition_plots": plot_artifacts, "plot_errors": plot_errors,
                    "partition_prior_prompt": prior,
                    "agent_visible_artifacts": agent_visible_artifacts}
@@ -394,7 +384,7 @@ class Partition(Tool):
     def _compute_candidates(self, scores):
         candidates = {"mean_std": self._mean_std_candidates(scores),
                       "kmeans": self._kmeans_candidates(scores), "kde": self._kde_candidates(scores),
-                      "selection_note": "Apply the partition prior using the current candidates and the fixed 20% anomaly upper bound."}
+                      "selection_note": "Apply the partition prior using the current candidates and current evidence."}
         kmeans = candidates["kmeans"]
         if kmeans.get("available"):
             for model in kmeans.get("models", []):
@@ -592,10 +582,8 @@ class Partition(Tool):
             ratio = float(raw_ratio)
         except (TypeError, ValueError) as exc:
             raise ValueError("estimated_anomaly_ratio_percent must be a number") from exc
-        if not np.isfinite(ratio) or ratio < 0 or ratio > ANOMALY_UB_PERCENT:
-            raise ValueError(
-                f"estimated_anomaly_ratio_percent must be in [0, {ANOMALY_UB_PERCENT:.0f}]"
-            )
+        if not np.isfinite(ratio) or ratio < 0 or ratio > 100:
+            raise ValueError("estimated_anomaly_ratio_percent must be in [0, 100]")
         ratio = round(ratio, 6)
         if ratio == 0:
             threshold = float(np.nextafter(np.min(scores), -np.inf))
