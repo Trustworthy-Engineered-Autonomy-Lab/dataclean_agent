@@ -82,7 +82,7 @@ main{flex:1 1 auto;display:flex;flex-direction:column;min-width:0;min-height:0}
   box-shadow:var(--shadow)}.layout.inspector-hidden .inspector{margin-right:0;transform:translateX(100%);transition:transform .2s ease}}
 
 /* ---------- panel ---------- */
-.panel{background:var(--panel-2);border:1px solid var(--border-soft);border-radius:var(--radius);overflow:hidden}
+.panel{background:var(--panel-2);border:1px solid var(--border-soft);border-radius:var(--radius);overflow:hidden;flex-shrink:0}
 .panel>summary{list-style:none;cursor:pointer;padding:11px 13px;display:flex;align-items:center;gap:8px;
   font:600 11.5px var(--display);letter-spacing:.04em;text-transform:uppercase;color:var(--text-dim);user-select:none}
 .panel>summary::-webkit-details-marker{display:none}
@@ -91,6 +91,7 @@ main{flex:1 1 auto;display:flex;flex-direction:column;min-width:0;min-height:0}
 .panel[open]>summary::before{transform:rotate(90deg)}
 .panel>summary .count{margin-left:auto;font:400 11px var(--mono);color:var(--text-faint)}
 .panel-body{padding:4px 13px 13px}
+#sliceSourceList{max-height:240px;overflow-y:auto;overflow-x:hidden;padding-right:4px}
 label{display:block;font:500 11px var(--sans);color:var(--text-faint);margin:9px 0 4px;letter-spacing:.02em}
 label:first-child{margin-top:2px}
 label.chk{display:flex;align-items:center;gap:7px;font:500 12px var(--sans);color:var(--text-dim);margin:10px 0 2px;cursor:pointer}
@@ -311,6 +312,16 @@ html[data-theme="light"] .modal-mask{background:rgba(20,30,45,.35)}
         <input id="datasetId" placeholder="default">
         <button class="btn" onclick="configure()">Configure Dataset</button>
         <div class="hint" id="configStatus"></div>
+      </div>
+    </details>
+
+    <details class="panel" id="sliceStagePanel" open>
+      <summary>Dataset Slice</summary>
+      <div class="panel-body">
+        <div class="hint" id="sliceHint">Configure a dataset above to choose its slice.</div>
+        <div id="sliceSourceList"></div>
+        <button class="btn" id="sliceApplyBtn" onclick="applySlice()" style="display:none">Apply Slice</button>
+        <div class="hint" id="sliceStatus"></div>
       </div>
     </details>
 
@@ -606,13 +617,88 @@ async function loadDataset(){
   if(datasetData.configured){
     const comps = datasetData.source_composition || {};
     const srcs = Object.keys(comps).length ? Object.entries(comps).map(([k,v])=>`${k}:${v}`).join(' · ') : (datasetData.sources||[]).join(', ');
+    const active = datasetData.active_samples;
+    const frameTxt = (active!=null && active!==datasetData.raw_samples) ? `${active} of ${datasetData.raw_samples??'?'} frames` : `${datasetData.raw_samples??'?'} frames`;
     el.className='hint ok';
-    el.innerHTML = `Ready: <b>${escapeHtml(datasetData.dataset_id||'')}</b> · ${datasetData.raw_samples??'?'} frames` +
+    el.innerHTML = `Ready: <b>${escapeHtml(datasetData.dataset_id||'')}</b> · ${frameTxt}` +
       (srcs?`<br><span style="color:var(--text-faint)">${escapeHtml(srcs)}</span>`:'');
   } else {
     el.className=datasetData.error?'hint err':'hint';
     el.textContent = datasetData.error || 'Dataset not configured. Enter path above to register BaseDataset.';
   }
+  renderSliceSources();
+}
+
+/* ---------- Dataset Slice (stage 2) ---------- */
+function renderSliceSources(){
+  const hint = $('sliceHint'), list = $('sliceSourceList'), btn = $('sliceApplyBtn');
+  list.innerHTML = '';
+  if(!datasetData || !datasetData.configured){
+    hint.style.display = '';
+    hint.textContent = 'Configure a dataset above to choose its slice.';
+    btn.style.display = 'none';
+    return;
+  }
+  const comps = datasetData.source_composition || {};
+  const names = Object.keys(comps).length ? Object.keys(comps) : (datasetData.sources||[]);
+  if(!names.length){
+    hint.style.display = '';
+    hint.textContent = 'No sources found in this dataset.';
+    btn.style.display = 'none';
+    return;
+  }
+  hint.style.display = 'none';
+  btn.style.display = '';
+  const excluded = new Set(datasetData.exclude_sources || []);
+  const caps = datasetData.max_per_source;
+  const capOf = (name) => (caps && typeof caps === 'object') ? caps[name] : (typeof caps === 'number' ? caps : undefined);
+  for(const name of names){
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !excluded.has(name);
+    cb.dataset.source = name;
+    cb.className = 'slice-include';
+    cb.style.cssText = 'flex:none;width:auto;margin:0';
+    const label = document.createElement('label');
+    label.style.cssText = 'flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font:400 12px var(--sans);color:var(--text);margin:0';
+    label.title = `${name} (${comps[name] ?? '?'})`;
+    label.textContent = `${name} (${comps[name] ?? '?'})`;
+    const capInput = document.createElement('input');
+    capInput.type = 'number';
+    capInput.min = '1';
+    capInput.step = '1';
+    capInput.placeholder = 'max';
+    capInput.style.cssText = 'flex:none;width:72px';
+    capInput.dataset.source = name;
+    capInput.className = 'slice-cap';
+    const existingCap = capOf(name);
+    if(existingCap != null) capInput.value = existingCap;
+    row.append(cb, label, capInput);
+    list.appendChild(row);
+  }
+}
+
+async function applySlice(){
+  const status = $('sliceStatus');
+  const excludeSources = [];
+  document.querySelectorAll('#sliceSourceList .slice-include').forEach(cb=>{
+    if(!cb.checked) excludeSources.push(cb.dataset.source);
+  });
+  const maxPerSource = {};
+  document.querySelectorAll('#sliceSourceList .slice-cap').forEach(inp=>{
+    if(inp.value !== '') maxPerSource[inp.dataset.source] = parseInt(inp.value, 10);
+  });
+  const body = {exclude_sources: excludeSources};
+  if(Object.keys(maxPerSource).length) body.max_per_source = maxPerSource;
+  try{
+    await api('dataset/subset', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body)});
+    status.className = 'hint ok';
+    status.textContent = 'Slice applied.';
+    await loadDataset();
+    await refreshActiveDetail();
+  }catch(e){ status.className = 'hint err'; status.textContent = e.message; }
 }
 
 /* ---------- Chat Output & Tool Collapsible Accordion ---------- */

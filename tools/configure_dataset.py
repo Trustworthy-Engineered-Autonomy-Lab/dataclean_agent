@@ -46,6 +46,13 @@ class ConfigureDataset(Tool):
                 "description": "Task-scoped sampling cap; never changes the physical workspace registry.",
             },
             "list_sources": {"type": "boolean"},
+            "persist_default_subset": {
+                "type": "boolean",
+                "description": (
+                    "When true (and no branch), save include/exclude/max_per_source as the "
+                    "workspace's default slice, applied to any task that doesn't declare its own."
+                ),
+            },
         },
         "required": [],
     }
@@ -58,6 +65,7 @@ class ConfigureDataset(Tool):
         exclude_sources=None,
         max_per_source=None,
         list_sources=False,
+        persist_default_subset=False,
         branch=None,
         workspace_dir=None,
         **_,
@@ -96,6 +104,11 @@ class ConfigureDataset(Tool):
         subset = self._normalize_subset(
             registry, include_sources, exclude_sources, max_per_source
         )
+        if persist_default_subset and not branch:
+            registry["include_sources"] = subset["include_sources"]
+            registry["exclude_sources"] = subset["exclude_sources"]
+            registry["max_per_source"] = subset["max_per_source"]
+            _save_dataset_registry(workspace_dir, registry)
         state = None
         if branch:
             state = _load(workspace_dir, branch=branch)
@@ -199,6 +212,9 @@ class ConfigureDataset(Tool):
             "image_column": image_col,
             "steering_column": steering_col,
             "vlm": (existing or {}).get("vlm"),
+            "include_sources": (existing or {}).get("include_sources"),
+            "exclude_sources": (existing or {}).get("exclude_sources"),
+            "max_per_source": (existing or {}).get("max_per_source"),
             "configured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         diagnostics = {}
